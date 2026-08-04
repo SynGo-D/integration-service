@@ -24,7 +24,8 @@ CREATE TABLE organizations (
     external_id VARCHAR(255) NOT NULL,
     name VARCHAR(255) NOT NULL,
     provider VARCHAR(20) NOT NULL CHECK (provider IN ('github', 'gitlab')),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT uq_organization_integration_external_id UNIQUE (integration_id, external_id)
 );
 
 CREATE TABLE repositories (
@@ -38,7 +39,8 @@ CREATE TABLE repositories (
     language VARCHAR(100),
     visibility VARCHAR(50),
     last_updated TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT uq_repository_org_external_id UNIQUE (organization_id, external_id)
 );
 
 CREATE INDEX idx_integrations_user_id ON integrations(user_id);
