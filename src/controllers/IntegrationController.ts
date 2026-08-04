@@ -33,9 +33,18 @@ export class IntegrationController {
             const userId = req.query.userId as string;
             const result = await this.integrationService.getIntegrations(userId);
 
+            const sanitized = result.map(({ id, userId: uid, provider, status, createdAt, updatedAt }) => ({
+                id,
+                userId: uid,
+                provider,
+                status,
+                createdAt,
+                updatedAt
+            }));
+
             res.status(200).json({
                 success: true,
-                integrations: result
+                integrations: sanitized
             });
         } catch (error) {
             res.status(400).json({
@@ -47,7 +56,7 @@ export class IntegrationController {
 
     async sync(req: Request, res: Response): Promise<void> {
         try {
-            const integrationId = req.params.id;
+            const integrationId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
             await this.integrationService.sync(integrationId);
 
             res.status(200).json({
@@ -63,7 +72,7 @@ export class IntegrationController {
 
     async listRepositories(req: Request, res: Response): Promise<void> {
         try {
-            const integrationId = req.params.id;
+            const integrationId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
             const result = await this.integrationService.getRepositories(integrationId);
 
             res.status(200).json({

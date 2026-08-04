@@ -12,4 +12,6 @@ export const env = {
     DB_USER: process.env.DB_USER!,
 
     DB_PASSWORD: process.env.DB_PASSWORD!,
+
+    TOKEN_ENCRYPTION_KEY: process.env.TOKEN_ENCRYPTION_KEY ?? "default-token-key-change-me"
 };

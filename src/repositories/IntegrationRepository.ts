@@ -1,5 +1,6 @@
 import { pool } from "../config/database";
 import { Integration } from "../models/Integration";
+import { decryptToken, encryptToken } from "../utils/crypto";
 
 export class IntegrationRepository {
     private mapRow(row: any): Integration {
@@ -7,8 +8,8 @@ export class IntegrationRepository {
             id: row.id,
             userId: row.user_id,
             provider: row.provider,
-            accessToken: row.access_token,
-            refreshToken: row.refresh_token ?? undefined,
+            accessToken: row.access_token ? decryptToken(row.access_token) : "",
+            refreshToken: row.refresh_token ? decryptToken(row.refresh_token) : undefined,
             status: row.status,
             createdAt: new Date(row.created_at),
             updatedAt: new Date(row.updated_at),
@@ -34,8 +35,8 @@ export class IntegrationRepository {
             integration.id,
             integration.userId,
             integration.provider,
-            integration.accessToken,
-            integration.refreshToken ?? null,
+            encryptToken(integration.accessToken),
+            integration.refreshToken ? encryptToken(integration.refreshToken) : null,
             integration.status,
             integration.createdAt ?? new Date(),
             integration.updatedAt ?? new Date(),

@@ -1,51 +1,36 @@
 import express from "express";
 import cors from "cors";
-import { ProviderFactory } from "./factories/ProviderFactory";
 import { IntegrationService } from "./services/IntegrationService";
 import { IntegrationController } from "./controllers/IntegrationController";
 import { createIntegrationRoutes } from "./routes/IntegrationRoutes";
+import { errorHandler } from "./middleware/errorHandler";
+import { validateConnectIntegration, validateUUIDParam } from "./middleware/validation";
+import { rateLimiter } from "./middleware/rateLimit";
+
 const app = express();
 
-// Create instances of the services and controllers
-const providerFactory = new ProviderFactory();
-const integrationService = new IntegrationService(providerFactory);
+app.use(rateLimiter);
+
+const integrationService = new IntegrationService();
 const integrationController = new IntegrationController(integrationService);
 const integrationRoutes = createIntegrationRoutes(integrationController);
 
-// Use the integration routes
-app.use("/integration", integrationRoutes);
-
-/*
- * Allow requests from other origins (Next.js frontend).
- */
+app.use(rateLimiter);
 app.use(cors());
-
-/*
- * Automatically parse incoming JSON request bodies.
- */
 app.use(express.json());
 
-/*
- * Temporary health endpoint.
- * Used to verify that the service is running.
- */
 app.get("/health", (req, res) => {
-
     res.json({
-
         service: "integration-service",
-
         status: "healthy"
-
     });
-
 });
 
-app.use(
-    "/integrations",
-    createIntegrationRoutes(
-        integrationController
-    )
-);
+app.post("/integrations/connect", validateConnectIntegration, (req, res) => integrationController.connect(req, res));
+app.get("/integrations", (req, res) => integrationController.list(req, res));
+app.post("/integrations/:id/sync", validateUUIDParam, (req, res) => integrationController.sync(req, res));
+app.get("/integrations/:id/repositories", validateUUIDParam, (req, res) => integrationController.listRepositories(req, res));
+
+app.use(errorHandler);
 
 export default app;

@@ -1,12 +1,9 @@
-import {
-    ParsedResource,
-    RepositoryProvider
-} from "../interfaces/RepositoryProvider";
+import { ParsedResource } from "../interfaces/RepositoryProvider";
 
 /**
  * Handles GitLab URL parsing.
  */
-export class GitLabProvider implements RepositoryProvider {
+export class GitLabProvider {
 
     supports(url: string): boolean {
         return url.includes("gitlab.com");
