@@ -1,33 +1,21 @@
-import { RepositoryProvider } from "../interfaces/RepositoryProvider";
-import { GitHubProvider } from "../providers/GitHubProvider";
-import { GitLabProvider } from "../providers/GitLabProvider";
+import { ProviderAdapter } from "../adapters/ProviderAdapter";
+import { GithubAdapter } from "../adapters/GithubAdapter";
+import { GitlabAdapter } from "../adapters/GitlabAdapter";
 
 /**
- * Creates the correct provider based on the URL.
+ * Returns the correct adapter for the requested provider.
  */
 export class ProviderFactory {
 
-    private readonly providers: RepositoryProvider[];
-
-    constructor() {
-        this.providers = [
-            new GitHubProvider(),
-            new GitLabProvider()
-        ];
-    }
-
-    /**
-     * Finds the first provider that supports the given URL.
-     */
-    public getProvider(url: string): RepositoryProvider {
-
-        const provider = this.providers.find(p => p.supports(url));
-
-        if (!provider) {
-            throw new Error("Unsupported source control provider.");
+    public static create(provider: string): ProviderAdapter {
+        switch (provider.toLowerCase()) {
+            case "github":
+                return new GithubAdapter();
+            case "gitlab":
+                return new GitlabAdapter();
+            default:
+                throw new Error("Unsupported provider. Expected 'github' or 'gitlab'.");
         }
-
-        return provider;
     }
 
 }
