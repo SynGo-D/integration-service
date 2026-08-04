@@ -1,3 +1,5 @@
+import { RepositoryMetadata } from "../types/RepositoryMetadata";
+
 /**
  * Represents any supported source control provider.
  * Every provider (GitHub, GitLab, etc.) must implement this contract.
@@ -13,6 +15,13 @@ export interface RepositoryProvider {
      * Extracts useful information from the URL.
      */
     parse(url: string): ParsedResource;
+
+    /**
+     * Retrieves public metadata for the parsed resource.
+     */
+    getPublicMetadata(
+        resource: ParsedResource
+    ): Promise<RepositoryMetadata>;
 }
 
 /**
@@ -30,3 +39,4 @@ export interface ParsedResource {
 
     fullName: string;
 }
+

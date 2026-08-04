@@ -13,19 +13,28 @@ export class IntegrationService {
     /**
      * Detects the provider and parses the repository URL.
      */
-    connect(url: string): ConnectRepositoryResponse {
-
+    async connect(url: string): Promise<ConnectRepositoryResponse> {
         const provider = this.providerFactory.getProvider(url);
 
         const resource = provider.parse(url);
 
-        return {
+        try {
 
-            success: true,
+            const metadata = await provider.getPublicMetadata(resource);
 
-            resource
+            return {
+                success: true,
+                resource: metadata
+            };
 
-        };
+        } catch (error) {
+
+            return {
+                success: true,
+                resource
+            };
+
+        }
 
     }
 

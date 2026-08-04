@@ -14,14 +14,14 @@ export class IntegrationController {
     /**
      * Connect endpoint.
      */
-    connectRepository(req: Request, res: Response): void {
+    async connectRepository(req: Request, res: Response): Promise<void> {
 
         try {
 
             const body = req.body as ConnectRepositoryRequest;
 
             const result =
-                this.integrationService.connect(body.url);
+                await this.integrationService.connect(body.url);
 
             res.status(200).json(result);
 

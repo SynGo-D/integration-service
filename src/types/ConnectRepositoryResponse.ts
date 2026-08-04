@@ -1,12 +1,10 @@
+import { RepositoryMetadata } from "./RepositoryMetadata";
 import { ParsedResource } from "../interfaces/RepositoryProvider";
 
 /**
- * Response returned to the frontend.
+ * Response for the repository connect flow.
  */
 export interface ConnectRepositoryResponse {
-
     success: boolean;
-
-    resource: ParsedResource;
-
+    resource: RepositoryMetadata | ParsedResource;
 }
