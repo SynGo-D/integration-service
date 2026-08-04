@@ -1,7 +1,19 @@
 import express from "express";
 import cors from "cors";
-
+import { ProviderFactory } from "./factories/ProviderFactory";
+import { IntegrationService } from "./services/IntegrationService";
+import { IntegrationController } from "./controllers/IntegrationController";
+import { createIntegrationRoutes } from "./routes/IntegrationRoutes";
 const app = express();
+
+// Create instances of the services and controllers
+const providerFactory = new ProviderFactory();
+const integrationService = new IntegrationService(providerFactory);
+const integrationController = new IntegrationController(integrationService);
+const integrationRoutes = createIntegrationRoutes(integrationController);
+
+// Use the integration routes
+app.use("/integration", integrationRoutes);
 
 /*
  * Allow requests from other origins (Next.js frontend).
@@ -18,10 +30,22 @@ app.use(express.json());
  * Used to verify that the service is running.
  */
 app.get("/health", (req, res) => {
-    res.status(200).json({
+
+    res.json({
+
         service: "integration-service",
+
         status: "healthy"
+
     });
+
 });
+
+app.use(
+    "/integrations",
+    createIntegrationRoutes(
+        integrationController
+    )
+);
 
 export default app;
