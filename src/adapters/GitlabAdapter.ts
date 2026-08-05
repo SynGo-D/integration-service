@@ -1,5 +1,6 @@
 import { ProviderAdapter, ProviderCredentials, ProviderOrganization, ProviderRepository, ProviderUser } from "./ProviderAdapter";
 import axios, { AxiosInstance } from "axios";
+import { RepositoryPreview } from "../types/RepositoryPreview";
 
 const GITLAB_API_BASE = "https://gitlab.com/api/v4";
 
@@ -89,6 +90,32 @@ export class GitlabAdapter implements ProviderAdapter {
             visibility: response.data.visibility,
             lastUpdated: response.data.last_activity_at,
             organizationExternalId: response.data.namespace?.full_path
+        };
+    }
+
+    async getPublicRepositoryMetadata(url: string): Promise<RepositoryPreview> {
+        const normalizedUrl = url.trim().replace(/\.git$/u, "");
+        const match = normalizedUrl.match(/^https?:\/\/(?:www\.)?gitlab\.com\/(.+?)$/iu);
+        if (!match) {
+            throw new Error("Invalid GitLab repository URL.");
+        }
+
+        const path = match[1];
+        const response = await this.client.get(`/projects/${encodeURIComponent(path)}`);
+
+        return {
+            provider: "gitlab",
+            repository: {
+                owner: response.data.namespace?.full_path ?? "",
+                name: response.data.name,
+                description: response.data.description,
+                language: response.data.language,
+                visibility: response.data.visibility,
+                stars: response.data.star_count,
+                forks: response.data.forks_count,
+                defaultBranch: response.data.default_branch,
+                updatedAt: response.data.last_activity_at
+            }
         };
     }
 }

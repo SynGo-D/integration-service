@@ -2,12 +2,14 @@ import dotenv from "dotenv";
 import app from "./app";
 import { env } from "./config/env";
 import { connectDatabase } from "./config/database";
-
+import userRoutes from "./routes/userRoutes";
 
 /*
  * Load environment variables from the .env file.
  */
 dotenv.config();
+
+app.use("/api", userRoutes);
 
 const PORT = env.PORT || 5001;
 

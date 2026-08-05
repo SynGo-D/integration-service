@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "migrate:up": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js --migrations-dir database/migrations up",
+    "migrate:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js --migrations-dir database/migrations down"
   },
   "repository": {
     "type": "git",
@@ -24,6 +26,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "node-pg-migrate": "^9.0.0",
     "pg": "^8.22.0"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { IntegrationService } from "../services/IntegrationService";
 import { ConnectIntegrationRequest } from "../types/ConnectIntegrationRequest";
+import { AppError } from "../errors/AppError";
 
 export class IntegrationController {
     constructor(
@@ -83,6 +84,50 @@ export class IntegrationController {
             res.status(400).json({
                 success: false,
                 message: error instanceof Error ? error.message : "Unknown error"
+            });
+        }
+    }
+
+    async startGithubOAuth(req: Request, res: Response): Promise<void> {
+        try {
+            const userId = req.query.userId as string;
+            const redirectUrl = await this.integrationService.generateGithubAuthorizationUrl(userId);
+            res.redirect(302, redirectUrl);
+        } catch (error) {
+            if (error instanceof AppError) {
+                res.status(error.statusCode).json({
+                    success: false,
+                    message: error.message
+                });
+                return;
+            }
+
+            res.status(500).json({
+                success: false,
+                message: "Internal server error."
+            });
+        }
+    }
+
+    async githubOAuthCallback(req: Request, res: Response): Promise<void> {
+        try {
+            const code = req.query.code as string;
+            const state = req.query.state as string;
+            const result = await this.integrationService.handleGithubOAuthCallback(code, state);
+
+            res.status(200).json(result);
+        } catch (error) {
+            if (error instanceof AppError) {
+                res.status(error.statusCode).json({
+                    success: false,
+                    message: error.message
+                });
+                return;
+            }
+
+            res.status(500).json({
+                success: false,
+                message: "Internal server error."
             });
         }
     }

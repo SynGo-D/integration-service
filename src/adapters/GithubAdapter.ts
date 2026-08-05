@@ -1,7 +1,10 @@
 import { ProviderAdapter, ProviderCredentials, ProviderOrganization, ProviderRepository, ProviderUser } from "./ProviderAdapter";
 import axios, { AxiosInstance } from "axios";
+import { env } from "../config/env";
+import { RepositoryPreview } from "../types/RepositoryPreview";
 
 const GITHUB_API_BASE = "https://api.github.com";
+const GITHUB_OAUTH_BASE = "https://github.com/login/oauth";
 
 export class GithubAdapter implements ProviderAdapter {
     private readonly client: AxiosInstance;
@@ -89,6 +92,77 @@ export class GithubAdapter implements ProviderAdapter {
             visibility: response.data.private ? "private" : "public",
             lastUpdated: response.data.updated_at,
             organizationExternalId: response.data.owner?.login
+        };
+    }
+
+    async getPublicRepositoryMetadata(url: string): Promise<RepositoryPreview> {
+        const normalizedUrl = url.trim().replace(/\.git$/u, "");
+        const match = normalizedUrl.match(/^https?:\/\/(?:www\.)?github\.com\/([^\/]+?)\/([^\/]+?)$/iu);
+        if (!match) {
+            throw new Error("Invalid GitHub repository URL.");
+        }
+
+        const owner = match[1];
+        const repo = match[2];
+
+        const response = await this.client.get(`/repos/${owner}/${repo}`);
+
+        return {
+            provider: "github",
+            repository: {
+                owner: response.data.owner.login,
+                name: response.data.name,
+                description: response.data.description,
+                language: response.data.language,
+                visibility: response.data.private ? "private" : "public",
+                stars: response.data.stargazers_count,
+                forks: response.data.forks_count,
+                defaultBranch: response.data.default_branch,
+                updatedAt: response.data.updated_at
+            }
+        };
+    }
+
+    generateAuthorizationUrl(state: string): string {
+        const params = new URLSearchParams({
+            client_id: env.GITHUB_CLIENT_ID,
+            redirect_uri: env.GITHUB_CALLBACK_URL,
+            scope: "repo read:org",
+            state,
+            allow_signup: "true"
+        });
+
+        return `${GITHUB_OAUTH_BASE}/authorize?${params.toString()}`;
+    }
+
+    async exchangeAuthorizationCode(code: string): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string; providerUser: ProviderUser }> {
+        const tokenResponse = await axios.post(
+            `${GITHUB_OAUTH_BASE}/access_token`,
+            {
+                client_id: env.GITHUB_CLIENT_ID,
+                client_secret: env.GITHUB_CLIENT_SECRET,
+                code,
+                redirect_uri: env.GITHUB_CALLBACK_URL
+            },
+            {
+                headers: {
+                    Accept: "application/json"
+                }
+            }
+        );
+
+        if (!tokenResponse.data || !tokenResponse.data.access_token) {
+            throw new Error("Failed to exchange authorization code for access token.");
+        }
+
+        const accessToken = tokenResponse.data.access_token;
+        const providerUser = await this.getUser(accessToken);
+
+        return {
+            accessToken,
+            refreshToken: undefined,
+            expiresAt: undefined,
+            providerUser
         };
     }
 }
