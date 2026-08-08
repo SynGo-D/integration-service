@@ -1,30 +1,30 @@
-import dotenv from "dotenv";
-import app from "./app";
-import { env } from "./config/env";
-import { connectDatabase } from "./config/database";
-import userRoutes from "./routes/userRoutes";
+// src/server.ts
 
-/*
- * Load environment variables from the .env file.
+import "dotenv/config";
+import app from "./app.js";
+import { env } from "./config/env.js";
+import { connectDatabase } from "./config/database.js";
+
+/**
+ * Integration Service entry point.
+ *
+ * Responsibilities:
+ *  1. Load environment variables (dotenv/config)
+ *  2. Verify database connectivity
+ *  3. Start the HTTP server
+ *
+ * Route registration and middleware are handled in app.ts.
  */
-dotenv.config();
-
-app.use("/api", userRoutes);
-
-const PORT = env.PORT || 5001;
-
-/*
-    Start the Integration Service.
-
-    The server only starts if the database
-    connection succeeds.
-*/
-async function startServer() {
+async function startServer(): Promise<void> {
     await connectDatabase();
 
-    app.listen(PORT, () => {
-        console.log(`Integration Service running on port ${PORT}`);
+    app.listen(env.PORT, () => {
+        console.log(`Integration Service running on port ${env.PORT}`);
+        console.log(`Health: http://localhost:${env.PORT}/health`);
     });
 }
 
-startServer();
+startServer().catch((error) => {
+    console.error("Failed to start Integration Service:", error);
+    process.exit(1);
+});

@@ -1,15 +1,24 @@
-import { pool } from "../config/database";
-import { Organization } from "../models/Organization";
+// src/repositories/OrganizationRepository.ts
 
+import { pool } from "../config/database.js";
+import { Organization } from "../models/Organization.js";
+
+/**
+ * Data-access layer for the `organizations` table.
+ *
+ * Used during org-level sync (future phases).
+ * Phase 1 does not call this repository directly.
+ */
 export class OrganizationRepository {
+
     private mapRow(row: any): Organization {
         return {
-            id: row.id,
+            id:            row.id,
             integrationId: row.integration_id,
-            externalId: row.external_id,
-            name: row.name,
-            provider: row.provider,
-            createdAt: new Date(row.created_at),
+            externalId:    row.external_id,
+            name:          row.name,
+            provider:      row.provider,
+            createdAt:     new Date(row.created_at)
         };
     }
 
@@ -32,7 +41,7 @@ export class OrganizationRepository {
             organization.externalId,
             organization.name,
             organization.provider,
-            organization.createdAt ?? new Date(),
+            organization.createdAt ?? new Date()
         ];
 
         const result = await pool.query(query, values);
@@ -60,7 +69,7 @@ export class OrganizationRepository {
             organization.externalId,
             organization.name,
             organization.provider,
-            organization.createdAt ?? new Date(),
+            organization.createdAt ?? new Date()
         ];
 
         const result = await pool.query(query, values);
@@ -71,7 +80,7 @@ export class OrganizationRepository {
         const query = `
             SELECT * FROM organizations
             WHERE integration_id = $1
-            ORDER BY name
+            ORDER BY name;
         `;
         const result = await pool.query(query, [integrationId]);
         return result.rows.map((row: any) => this.mapRow(row));
