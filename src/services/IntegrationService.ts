@@ -2,6 +2,7 @@
 
 import { randomBytes } from "crypto";
 import { ProviderFactory } from "../factories/ProviderFactory.js";
+import { ProviderAdapter } from "../adapters/ProviderAdapter.js";
 import { IntegrationRepository } from "../repositories/IntegrationRepository.js";
 import { Integration } from "../models/Integration.js";
 import { RepositoryPreview } from "../types/RepositoryPreview.js";
@@ -213,7 +214,57 @@ export class IntegrationService {
             tokenResult.providerUser.username
         );
 
+        // Best-effort webhook registration: a repository is considered
+        // successfully connected once OAuth completes, regardless of
+        // whether hook creation also succeeds — a transient GitHub/GitLab
+        // API failure here shouldn't undo an otherwise-successful
+        // authorization. Failures are logged, not thrown.
+        await this.registerWebhook(adapter, activeIntegration, tokenResult.accessToken, oauthState.provider);
+
         return activeIntegration;
+    }
+
+    /**
+     * Creates a provider-side webhook pointed at webhook-listener for the
+     * newly-connected repository, and records its ID. Skips silently (with
+     * a warning) if no shared secret is configured for the provider —
+     * matches this repo's existing pattern of leaving unconfigured
+     * providers (e.g. GitLab OAuth credentials) as inert placeholders
+     * rather than throwing at startup.
+     */
+    private async registerWebhook(
+        adapter: ProviderAdapter,
+        integration: Integration,
+        accessToken: string,
+        provider: "github" | "gitlab"
+    ): Promise<void> {
+        const secret = provider === "github" ? env.GITHUB_WEBHOOK_SECRET : env.GITLAB_WEBHOOK_SECRET;
+
+        if (!secret) {
+            console.warn(
+                `Skipping webhook registration for integration ${integration.id}: ` +
+                `no webhook secret configured for provider '${provider}'.`
+            );
+            return;
+        }
+
+        try {
+            const callbackUrl = `${env.WEBHOOK_LISTENER_URL}/webhooks/${provider}`;
+            const { providerWebhookId } = await adapter.registerWebhook(
+                accessToken,
+                integration.repositoryOwner,
+                integration.repositoryName,
+                callbackUrl,
+                secret
+            );
+            await this.integrationRepository.setWebhookId(integration.id, providerWebhookId);
+        } catch (err) {
+            console.error(
+                `Webhook registration failed for integration ${integration.id} ` +
+                `(${integration.repositoryOwner}/${integration.repositoryName}):`,
+                err instanceof Error ? err.message : err
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -244,12 +295,33 @@ export class IntegrationService {
 
     /**
      * Revokes (soft-deletes) an integration so the user can reconnect later.
+     * Also removes the provider-side webhook, if one was registered — best
+     * effort, same reasoning as registration: a revoke shouldn't get stuck
+     * because the provider's hook-deletion API had a hiccup.
      */
     async revokeIntegration(id: string): Promise<void> {
         const integration = await this.integrationRepository.findById(id);
         if (!integration) {
             throw new AppError("Integration not found.", 404);
         }
+
+        if (integration.providerWebhookId) {
+            try {
+                const adapter = ProviderFactory.create(integration.provider);
+                await adapter.unregisterWebhook(
+                    integration.accessToken,
+                    integration.repositoryOwner,
+                    integration.repositoryName,
+                    integration.providerWebhookId
+                );
+            } catch (err) {
+                console.error(
+                    `Webhook removal failed for integration ${integration.id}:`,
+                    err instanceof Error ? err.message : err
+                );
+            }
+        }
+
         await this.integrationRepository.updateStatus(id, "REVOKED");
     }
 

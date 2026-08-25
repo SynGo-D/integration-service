@@ -182,6 +182,64 @@ export class GithubAdapter implements ProviderAdapter {
     }
 
     // -----------------------------------------------------------------------
+    // Webhook registration
+    // -----------------------------------------------------------------------
+
+    /**
+     * The "repo" scope already granted for Phase 1 (see generateAuthorizationUrl)
+     * includes write access to a repository's own webhooks, so no additional
+     * scope is needed here — https://docs.github.com/rest/repos/webhooks.
+     */
+    async registerWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        callbackUrl: string,
+        secret: string
+    ): Promise<{ providerWebhookId: string }> {
+        try {
+            const response = await this.client.post(
+                `/repos/${owner}/${repo}/hooks`,
+                {
+                    name:   "web",
+                    active: true,
+                    events: ["pull_request"],
+                    config: {
+                        url:          callbackUrl,
+                        content_type: "json",
+                        secret,
+                        insecure_ssl: "0"
+                    }
+                },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            return { providerWebhookId: response.data.id.toString() };
+        } catch (err: any) {
+            const reason = err?.response?.data?.message ?? err?.message ?? "unknown error";
+            throw new AppError(`GitHub webhook registration failed: ${reason}`, 502);
+        }
+    }
+
+    async unregisterWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        providerWebhookId: string
+    ): Promise<void> {
+        try {
+            await this.client.delete(`/repos/${owner}/${repo}/hooks/${providerWebhookId}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+        } catch (err: any) {
+            // 404 means it's already gone (e.g. removed manually) — not an error worth failing revoke over.
+            if (err?.response?.status === 404) return;
+            const reason = err?.response?.data?.message ?? err?.message ?? "unknown error";
+            throw new AppError(`GitHub webhook removal failed: ${reason}`, 502);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 

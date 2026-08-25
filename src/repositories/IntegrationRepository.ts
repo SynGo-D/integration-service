@@ -40,6 +40,8 @@ export class IntegrationRepository {
             providerUserId:   row.provider_user_id   ?? undefined,
             providerUsername: row.provider_username  ?? undefined,
             status:           row.status,
+            providerWebhookId:   row.provider_webhook_id ?? undefined,
+            webhookRegisteredAt: row.webhook_registered_at ? new Date(row.webhook_registered_at) : undefined,
             createdAt:        new Date(row.created_at),
             updatedAt:        new Date(row.updated_at)
         };
@@ -173,6 +175,36 @@ export class IntegrationRepository {
         }
 
         return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Records the provider-side webhook ID after successful registration.
+     * Called by IntegrationService right after the adapter creates the hook.
+     */
+    async setWebhookId(id: string, providerWebhookId: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET provider_webhook_id   = $1,
+                 webhook_registered_at = NOW(),
+                 updated_at            = NOW()
+             WHERE id = $2;`,
+            [providerWebhookId, id]
+        );
+    }
+
+    /**
+     * Clears the stored webhook ID — called after the provider-side hook has
+     * been deleted (on revoke) or was found to have already been removed.
+     */
+    async clearWebhookId(id: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET provider_webhook_id   = NULL,
+                 webhook_registered_at = NULL,
+                 updated_at            = NOW()
+             WHERE id = $1;`,
+            [id]
+        );
     }
 
     // -----------------------------------------------------------------------

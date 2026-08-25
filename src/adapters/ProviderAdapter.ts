@@ -95,4 +95,35 @@ export interface ProviderAdapter {
      * integration record.
      */
     exchangeAuthorizationCode(code: string): Promise<OAuthTokenResult>;
+
+    // -- Webhook registration --------------------------------------------
+
+    /**
+     * Registers a webhook on the provider so pull/merge-request events for
+     * this repository are delivered to `callbackUrl` (webhook-listener).
+     * Called immediately after OAuth completes — see
+     * IntegrationService.handleOAuthCallback.
+     *
+     * `secret` is used to sign (GitHub, HMAC) or authenticate (GitLab, a
+     * plain shared token) deliveries; it must be the same value
+     * webhook-listener verifies incoming requests against.
+     */
+    registerWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        callbackUrl: string,
+        secret: string
+    ): Promise<{ providerWebhookId: string }>;
+
+    /**
+     * Removes a previously-registered webhook. Called when an integration is
+     * revoked, so a disconnected repository stops sending events.
+     */
+    unregisterWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        providerWebhookId: string
+    ): Promise<void>;
 }

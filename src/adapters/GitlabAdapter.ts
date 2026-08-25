@@ -22,7 +22,10 @@ const GITLAB_OAUTH_BASE = "https://gitlab.com/oauth";
  * Scope strategy (Principle of Least Privilege):
  *   • "read_repository" — allows reading repository contents.
  *   • "read_user"       — allows fetching the authenticated user profile.
- *   These are the minimum scopes required for Phase 1 single-repo integration.
+ *   • "api"              — required for webhook management
+ *     (POST/DELETE /projects/:id/hooks); GitLab has no narrower scope that
+ *     covers hook creation, so this is a deliberate, documented widening
+ *     beyond the two read-only scopes above rather than an oversight.
  */
 export class GitlabAdapter implements ProviderAdapter {
 
@@ -137,8 +140,9 @@ export class GitlabAdapter implements ProviderAdapter {
             client_id:     env.GITLAB_CLIENT_ID,
             redirect_uri:  env.GITLAB_CALLBACK_URL,
             response_type: "code",
-            // Minimum scopes for Phase 1 single-repository integration
-            scope:         "read_repository read_user",
+            // Minimum scopes for Phase 1 single-repository integration,
+            // plus "api" for webhook registration — see class docblock.
+            scope:         "read_repository read_user api",
             state
         });
 
@@ -182,6 +186,65 @@ export class GitlabAdapter implements ProviderAdapter {
                 : undefined,
             providerUser
         };
+    }
+
+    // -----------------------------------------------------------------------
+    // Webhook registration
+    // -----------------------------------------------------------------------
+
+    /**
+     * GitLab identifies projects by numeric ID or URL-encoded
+     * "namespace/path" — the latter is what this service already has on
+     * hand (owner/repo), so no extra lookup is needed.
+     *
+     * Unlike GitHub's HMAC signature, GitLab compares `token` to the
+     * `X-Gitlab-Token` header as a plain shared secret (see
+     * GitlabWebhookHandler.verifySignature on webhook-listener) — passed
+     * as-is here, not hashed.
+     */
+    async registerWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        callbackUrl: string,
+        secret: string
+    ): Promise<{ providerWebhookId: string }> {
+        try {
+            const response = await this.client.post(
+                `/projects/${encodeURIComponent(`${owner}/${repo}`)}/hooks`,
+                {
+                    url:                     callbackUrl,
+                    token:                   secret,
+                    merge_requests_events:   true,
+                    push_events:             false,
+                    enable_ssl_verification: true
+                },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            return { providerWebhookId: response.data.id.toString() };
+        } catch (err: any) {
+            const reason = err?.response?.data?.message ?? err?.message ?? "unknown error";
+            throw new AppError(`GitLab webhook registration failed: ${reason}`, 502);
+        }
+    }
+
+    async unregisterWebhook(
+        token: string,
+        owner: string,
+        repo: string,
+        providerWebhookId: string
+    ): Promise<void> {
+        try {
+            await this.client.delete(
+                `/projects/${encodeURIComponent(`${owner}/${repo}`)}/hooks/${providerWebhookId}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+        } catch (err: any) {
+            if (err?.response?.status === 404) return;
+            const reason = err?.response?.data?.message ?? err?.message ?? "unknown error";
+            throw new AppError(`GitLab webhook removal failed: ${reason}`, 502);
+        }
     }
 
     // -----------------------------------------------------------------------

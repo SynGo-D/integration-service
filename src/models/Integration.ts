@@ -46,6 +46,17 @@ export interface Integration {
     /** Lifecycle status. */
     status: "PENDING" | "ACTIVE" | "EXPIRED" | "REVOKED";
 
+    /**
+     * ID of the webhook registered on the provider's side (GitHub hook ID /
+     * GitLab project-hook ID). Undefined if registration hasn't happened yet
+     * or failed — see IntegrationService.handleOAuthCallback, which treats
+     * webhook registration as best-effort and doesn't fail the integration
+     * over it.
+     */
+    providerWebhookId?: string;
+
+    webhookRegisteredAt?: Date;
+
     createdAt: Date;
 
     updatedAt: Date;

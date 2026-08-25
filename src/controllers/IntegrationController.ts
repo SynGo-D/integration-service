@@ -267,6 +267,7 @@ export class IntegrationController {
             repositoryName:  integration.repositoryName,
             providerUsername: integration.providerUsername,
             status:          integration.status,
+            webhookRegistered: Boolean(integration.providerWebhookId),
             createdAt:       integration.createdAt,
             updatedAt:       integration.updatedAt
         };

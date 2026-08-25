@@ -59,4 +59,23 @@ export const env = {
 
     FRONTEND_SUCCESS_URL: process.env.FRONTEND_SUCCESS_URL ?? "http://localhost:3000/integrations",
     FRONTEND_ERROR_URL:   process.env.FRONTEND_ERROR_URL   ?? "http://localhost:3000/integrations/error",
+
+    // -----------------------------------------------------------------------
+    // Webhook auto-registration
+    // Base URL of the webhook-listener service that GitHub/GitLab should
+    // deliver events to. Must be publicly reachable from the provider's
+    // servers — localhost only works for provider sandboxes/local replay,
+    // not real deliveries; point this at a tunnel or public domain in front
+    // of webhook-listener for real webhook delivery.
+    //
+    // The two secrets MUST be the exact same values webhook-listener's own
+    // .env uses (GITHUB_WEBHOOK_SECRET / GITLAB_WEBHOOK_SECRET) — this
+    // service sets them when creating the hook, webhook-listener verifies
+    // deliveries against them; if they diverge, every delivery fails
+    // signature verification.
+    // -----------------------------------------------------------------------
+
+    WEBHOOK_LISTENER_URL: process.env.WEBHOOK_LISTENER_URL ?? "http://localhost:5002",
+    GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET ?? "",
+    GITLAB_WEBHOOK_SECRET: process.env.GITLAB_WEBHOOK_SECRET ?? "",
 };
