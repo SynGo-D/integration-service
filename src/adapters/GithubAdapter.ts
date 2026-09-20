@@ -7,7 +7,8 @@ import {
     ProviderCredentials,
     ProviderOrganization,
     ProviderRepository,
-    ProviderUser
+    ProviderUser,
+    RefreshedToken
 } from "./ProviderAdapter.js";
 import { env } from "../config/env.js";
 import { RepositoryPreview } from "../types/RepositoryPreview.js";
@@ -176,8 +177,49 @@ export class GithubAdapter implements ProviderAdapter {
         return {
             accessToken:  data.access_token,
             refreshToken: data.refresh_token ?? undefined,
-            expiresAt:    undefined, // GitHub PATs do not expire by default
+            // Undefined unless the OAuth App has token expiration enabled;
+            // classic GitHub OAuth App tokens do not expire. When it *is*
+            // enabled GitHub returns expires_in (8 hours) plus a refresh
+            // token, and the refresh path below handles it.
+            expiresAt:    data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : undefined,
             providerUser
+        };
+    }
+
+    async refreshAccessToken(refreshToken: string): Promise<RefreshedToken> {
+        if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+            throw new AppError("GitHub OAuth credentials are not configured.", 500);
+        }
+
+        const tokenResponse = await axios.post(
+            `${GITHUB_OAUTH_BASE}/access_token`,
+            {
+                client_id:     env.GITHUB_CLIENT_ID,
+                client_secret: env.GITHUB_CLIENT_SECRET,
+                grant_type:    "refresh_token",
+                refresh_token: refreshToken
+            },
+            { headers: { Accept: "application/json" } }
+        );
+
+        const data = tokenResponse.data;
+
+        // GitHub answers a rejected refresh with HTTP 200 and an `error`
+        // field rather than a 4xx, so the status code alone can't be
+        // trusted here — same shape as the code exchange above.
+        if (!data?.access_token) {
+            const reason = data?.error_description ?? data?.error ?? "unknown";
+            throw new AppError(`GitHub token refresh failed: ${reason}`, 502);
+        }
+
+        return {
+            accessToken:  data.access_token,
+            refreshToken: data.refresh_token ?? undefined,
+            expiresAt:    data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : undefined
         };
     }
 

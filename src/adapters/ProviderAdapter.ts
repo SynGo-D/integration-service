@@ -46,6 +46,25 @@ export interface OAuthTokenResult {
     providerUser: ProviderUser;
 }
 
+/**
+ * Result of exchanging a refresh token for a fresh access token.
+ *
+ * Narrower than OAuthTokenResult on purpose: a refresh re-establishes
+ * credentials for an identity that's already known and stored, so making
+ * adapters re-fetch the provider user would be a wasted API call on a path
+ * that may run often.
+ *
+ * `refreshToken` is optional but usually present — both GitHub and GitLab
+ * rotate it, issuing a new one alongside each access token and invalidating
+ * the old. Callers must persist whatever comes back, or the *next* refresh
+ * will fail with an already-used token.
+ */
+export interface RefreshedToken {
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Core adapter contract — every supported provider must implement this.
 // ---------------------------------------------------------------------------
@@ -95,6 +114,21 @@ export interface ProviderAdapter {
      * integration record.
      */
     exchangeAuthorizationCode(code: string): Promise<OAuthTokenResult>;
+
+    /**
+     * Exchanges a stored refresh token for a fresh access token.
+     *
+     * Only reached for integrations whose token actually carries an expiry
+     * (see IntegrationService.getValidAccessToken) — GitHub OAuth App tokens
+     * don't expire by default, so in practice this is GitLab's path, where
+     * tokens last two hours.
+     *
+     * Throws on any provider rejection. A refresh token can be revoked by
+     * the user, expired outright, or already consumed by a previous refresh,
+     * and none of those are recoverable here — the caller marks the
+     * integration EXPIRED and the user reconnects.
+     */
+    refreshAccessToken(refreshToken: string): Promise<RefreshedToken>;
 
     // -- Webhook registration --------------------------------------------
 

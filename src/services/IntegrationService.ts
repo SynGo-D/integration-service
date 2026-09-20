@@ -41,13 +41,35 @@ import { env } from "../config/env.js";
  */
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * Refresh this long before a token actually expires. Without a margin, a
+ * token judged valid at the start of a request can expire while the
+ * provider call is still in flight, producing a 401 that looks like a
+ * revoked integration.
+ */
+const TOKEN_REFRESH_MARGIN_MS = 60 * 1000;
+
+/**
+ * The slice of ProviderFactory this service depends on. Declared as an
+ * interface so tests can substitute a stub adapter — the concrete factory
+ * builds real adapters that would reach GitHub over the network.
+ */
+export interface ProviderAdapterFactory {
+    create(provider: string): ProviderAdapter;
+}
+
 export class IntegrationService {
 
     private readonly integrationRepository: IntegrationRepository;
+    private readonly providerFactory: ProviderAdapterFactory;
 
-    constructor(integrationRepository?: IntegrationRepository) {
+    constructor(
+        integrationRepository?: IntegrationRepository,
+        providerFactory?: ProviderAdapterFactory
+    ) {
         this.integrationRepository =
             integrationRepository ?? new IntegrationRepository();
+        this.providerFactory = providerFactory ?? ProviderFactory;
     }
 
     // -----------------------------------------------------------------------
@@ -66,7 +88,7 @@ export class IntegrationService {
         }
 
         const parsed  = RepositoryUrlParser.parse(url);
-        const adapter = ProviderFactory.create(parsed.provider);
+        const adapter = this.providerFactory.create(parsed.provider);
 
         return adapter.getPublicRepositoryMetadata(url);
     }
@@ -162,7 +184,7 @@ export class IntegrationService {
             .toString("base64url");
 
         // Delegate URL construction to the provider-specific adapter
-        const adapter          = ProviderFactory.create(parsed.provider);
+        const adapter          = this.providerFactory.create(parsed.provider);
         const authorizationUrl = adapter.generateAuthorizationUrl(encodedState);
 
         return { integrationId: integration.id, authorizationUrl };
@@ -218,7 +240,7 @@ export class IntegrationService {
         }
 
         // Use the provider from the state (avoids an extra DB read just to get the provider)
-        const adapter = ProviderFactory.create(oauthState.provider);
+        const adapter = this.providerFactory.create(oauthState.provider);
 
         // Exchange the authorization code for access tokens
         const tokenResult = await adapter.exchangeAuthorizationCode(code);
@@ -326,9 +348,13 @@ export class IntegrationService {
 
         if (integration.providerWebhookId) {
             try {
-                const adapter = ProviderFactory.create(integration.provider);
+                const adapter = this.providerFactory.create(integration.provider);
+                // Refresh first if needed: an integration being revoked is
+                // often one that's been connected a long time, which is
+                // exactly when a stored token has gone stale.
+                const accessToken = await this.getValidAccessToken(integration);
                 await adapter.unregisterWebhook(
-                    integration.accessToken,
+                    accessToken,
                     integration.repositoryOwner,
                     integration.repositoryName,
                     integration.providerWebhookId
@@ -342,6 +368,86 @@ export class IntegrationService {
         }
 
         await this.integrationRepository.updateStatus(id, "REVOKED");
+    }
+
+    // -----------------------------------------------------------------------
+    // Token lifecycle
+    // -----------------------------------------------------------------------
+
+    /**
+     * Returns an access token that is valid *now*, refreshing it first if
+     * it has expired or is about to.
+     *
+     * Every provider call made with a stored token should go through here
+     * rather than reading `integration.accessToken` directly. GitHub OAuth
+     * App tokens don't expire by default, which makes the stale-token path
+     * invisible in development and then breaks GitLab, whose tokens last
+     * two hours.
+     *
+     * On an unrecoverable failure the integration is marked EXPIRED before
+     * throwing, so the UI can prompt the user to reconnect instead of the
+     * connection silently appearing healthy while every provider call 401s.
+     */
+    async getValidAccessToken(integration: Integration): Promise<string> {
+        // No expiry recorded means the provider issues non-expiring tokens
+        // (classic GitHub OAuth Apps). Nothing to refresh.
+        if (!integration.tokenExpiresAt) {
+            return integration.accessToken;
+        }
+
+        const expiresInMs = integration.tokenExpiresAt.getTime() - Date.now();
+        if (expiresInMs > TOKEN_REFRESH_MARGIN_MS) {
+            return integration.accessToken;
+        }
+
+        if (!integration.refreshToken) {
+            // Expired with no way to renew — the user must reconnect.
+            await this.markExpired(integration.id);
+            throw new AppError(
+                "This integration's access has expired. Please reconnect the repository.",
+                401
+            );
+        }
+
+        try {
+            const adapter = this.providerFactory.create(integration.provider);
+            const refreshed = await adapter.refreshAccessToken(integration.refreshToken);
+
+            await this.integrationRepository.updateTokens(
+                integration.id,
+                refreshed.accessToken,
+                refreshed.refreshToken,
+                refreshed.expiresAt ? new Date(refreshed.expiresAt) : undefined
+            );
+
+            return refreshed.accessToken;
+
+        } catch (err) {
+            // A refresh token can be revoked by the user, expire outright,
+            // or already have been consumed — none of which this call can
+            // recover from.
+            console.error(
+                `Token refresh failed for integration ${integration.id}:`,
+                err instanceof Error ? err.message : err
+            );
+            await this.markExpired(integration.id);
+            throw new AppError(
+                "Could not renew access to this repository. Please reconnect it.",
+                401
+            );
+        }
+    }
+
+    /** Best-effort status flip — never masks the original token failure. */
+    private async markExpired(id: string): Promise<void> {
+        try {
+            await this.integrationRepository.updateStatus(id, "EXPIRED");
+        } catch (err) {
+            console.error(
+                `Failed to mark integration ${id} as EXPIRED:`,
+                err instanceof Error ? err.message : err
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -273,6 +273,47 @@ export class IntegrationRepository {
     }
 
     /**
+     * Replaces the stored credentials after a successful token refresh.
+     *
+     * `refreshToken` is overwritten rather than preserved when the provider
+     * returns a new one, because both GitHub and GitLab rotate them — the
+     * token just used is dead, so keeping the old value would break the
+     * next refresh. Passing `undefined` leaves the existing one in place
+     * for the rare provider that doesn't rotate.
+     */
+    async updateTokens(
+        id:             string,
+        accessToken:    string,
+        refreshToken:   string | undefined,
+        tokenExpiresAt: Date   | undefined
+    ): Promise<Integration> {
+
+        const query = `
+            UPDATE integrations
+            SET access_token     = $1,
+                refresh_token    = COALESCE($2, refresh_token),
+                token_expires_at = $3,
+                status           = 'ACTIVE',
+                updated_at       = NOW()
+            WHERE id = $4
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, [
+            encryptToken(accessToken),
+            refreshToken ? encryptToken(refreshToken) : null,
+            tokenExpiresAt ?? null,
+            id
+        ]);
+
+        if (result.rows.length === 0) {
+            throw new Error(`Integration ${id} not found.`);
+        }
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
      * Updates the lifecycle status of an integration (e.g. to EXPIRED or REVOKED).
      */
     async updateStatus(
