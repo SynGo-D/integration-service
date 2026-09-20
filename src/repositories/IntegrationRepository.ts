@@ -1,9 +1,22 @@
 // src/repositories/IntegrationRepository.ts
 
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { pool } from "../config/database.js";
 import { Integration } from "../models/Integration.js";
 import { encryptToken, decryptToken } from "../utils/crypto.js";
+
+/**
+ * Outcome of verifying and consuming an OAuth nonce.
+ *
+ * Deliberately does not distinguish "wrong nonce" from "expired nonce" —
+ * both collapse to `invalid`, so a caller probing the callback endpoint
+ * learns nothing about which part of a forged state was wrong.
+ */
+export type ConsumeNonceResult =
+    | "consumed"
+    | "not_found"
+    | "not_pending"
+    | "invalid";
 
 /**
  * Data-access layer for the `integrations` table.
@@ -64,7 +77,9 @@ export class IntegrationRepository {
         provider:        "github" | "gitlab",
         repositoryUrl:   string,
         repositoryOwner: string,
-        repositoryName:  string
+        repositoryName:  string,
+        oauthNonce:      string,
+        oauthExpiresAt:  Date
     ): Promise<Integration> {
 
         const id = randomUUID();
@@ -78,11 +93,13 @@ export class IntegrationRepository {
                 repository_owner,
                 repository_name,
                 access_token,
+                oauth_nonce,
+                oauth_expires_at,
                 status,
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', NOW(), NOW())
             RETURNING *;
         `;
 
@@ -97,10 +114,113 @@ export class IntegrationRepository {
             repositoryUrl,
             repositoryOwner,
             repositoryName,
-            placeholderToken
+            placeholderToken,
+            oauthNonce,
+            oauthExpiresAt
         ]);
 
         return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Verifies the OAuth nonce for a PENDING integration and consumes it in
+     * the same transaction.
+     *
+     * This is the CSRF gate for the OAuth callback. Three properties matter:
+     *
+     *   • Atomic — the row is locked with SELECT ... FOR UPDATE, so two
+     *     concurrent callbacks for the same integration can't both pass the
+     *     check before either clears the nonce.
+     *   • One-time — the nonce is set to NULL on success, so replaying the
+     *     same callback URL (from browser history, a proxy log, or a
+     *     Referer header) fails.
+     *   • Constant-time — compared with timingSafeEqual rather than `=`, so
+     *     the comparison itself reveals nothing about how much of a guessed
+     *     nonce was correct.
+     *
+     * The nonce is intentionally never surfaced on the Integration model —
+     * nothing outside this method can read it, so it cannot leak through an
+     * API response by accident.
+     */
+    async consumeOAuthNonce(id: string, nonce: string): Promise<ConsumeNonceResult> {
+        const client = await pool.connect();
+
+        try {
+            await client.query("BEGIN");
+
+            const result = await client.query(
+                `SELECT status, oauth_nonce, oauth_expires_at
+                 FROM integrations
+                 WHERE id = $1
+                 FOR UPDATE;`,
+                [id]
+            );
+
+            if (result.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return "not_found";
+            }
+
+            const row = result.rows[0];
+
+            if (row.status !== "PENDING") {
+                await client.query("ROLLBACK");
+                return "not_pending";
+            }
+
+            // A NULL nonce means this flow was already completed — the
+            // success path clears it.
+            if (!row.oauth_nonce || !row.oauth_expires_at) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            if (new Date(row.oauth_expires_at).getTime() <= Date.now()) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            if (!this.nonceMatches(row.oauth_nonce, nonce)) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            await client.query(
+                `UPDATE integrations
+                 SET oauth_nonce      = NULL,
+                     oauth_expires_at = NULL,
+                     updated_at       = NOW()
+                 WHERE id = $1;`,
+                [id]
+            );
+
+            await client.query("COMMIT");
+            return "consumed";
+
+        } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    /**
+     * Constant-time nonce comparison.
+     *
+     * timingSafeEqual throws on length mismatch, so lengths are checked
+     * first — that leaks only the length of a fixed-format value the
+     * attacker already knows, not any of its content.
+     */
+    private nonceMatches(stored: string, provided: string): boolean {
+        const storedBuffer   = Buffer.from(stored, "utf8");
+        const providedBuffer = Buffer.from(provided, "utf8");
+
+        if (storedBuffer.length !== providedBuffer.length) {
+            return false;
+        }
+
+        return timingSafeEqual(storedBuffer, providedBuffer);
     }
 
     /**
