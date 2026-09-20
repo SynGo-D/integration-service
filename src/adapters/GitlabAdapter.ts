@@ -7,7 +7,8 @@ import {
     ProviderCredentials,
     ProviderOrganization,
     ProviderRepository,
-    ProviderUser
+    ProviderUser,
+    RefreshedToken
 } from "./ProviderAdapter.js";
 import { env } from "../config/env.js";
 import { RepositoryPreview } from "../types/RepositoryPreview.js";
@@ -185,6 +186,44 @@ export class GitlabAdapter implements ProviderAdapter {
                 ? new Date(Date.now() + data.expires_in * 1000).toISOString()
                 : undefined,
             providerUser
+        };
+    }
+
+    async refreshAccessToken(refreshToken: string): Promise<RefreshedToken> {
+        if (!env.GITLAB_CLIENT_ID || !env.GITLAB_CLIENT_SECRET) {
+            throw new AppError("GitLab OAuth credentials are not configured.", 500);
+        }
+
+        // GitLab access tokens last two hours, so unlike GitHub this path is
+        // the normal case rather than an opt-in one — an integration left
+        // connected overnight will always arrive here.
+        const tokenResponse = await axios.post(
+            `${GITLAB_OAUTH_BASE}/token`,
+            {
+                client_id:     env.GITLAB_CLIENT_ID,
+                client_secret: env.GITLAB_CLIENT_SECRET,
+                grant_type:    "refresh_token",
+                refresh_token: refreshToken,
+                redirect_uri:  env.GITLAB_CALLBACK_URL
+            },
+            { headers: { "Content-Type": "application/json" } }
+        );
+
+        const data = tokenResponse.data;
+
+        if (!data?.access_token) {
+            const reason = data?.error_description ?? data?.error ?? "unknown";
+            throw new AppError(`GitLab token refresh failed: ${reason}`, 502);
+        }
+
+        return {
+            accessToken:  data.access_token,
+            // GitLab rotates refresh tokens: the one just used is now dead,
+            // so failing to persist this would break the *next* refresh.
+            refreshToken: data.refresh_token ?? undefined,
+            expiresAt:    data.expires_in
+                ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+                : undefined
         };
     }
 
