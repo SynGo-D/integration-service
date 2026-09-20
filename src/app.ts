@@ -13,15 +13,13 @@ import { createRepositoryPreviewRoutes } from "./routes/RepositoryPreviewRoutes.
 import userRoutes from "./routes/userRoutes.js";
 
 import { errorHandler } from "./middleware/errorHandler.js";
-import { rateLimiter } from "./middleware/rateLimit.js";
+import { globalLimiter } from "./middleware/rateLimit.js";
 
 const app = express();
 
 // ---------------------------------------------------------------------------
 // Global middleware
 // ---------------------------------------------------------------------------
-
-app.use(rateLimiter);
 
 app.use(cors({
     origin: process.env.FRONTEND_ORIGIN ?? "*",
@@ -30,6 +28,13 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// Rate limiting runs *after* express.json(), not before: the per-route
+// limiters key on `req.body.userId` (see middleware/rateLimit.ts), and the
+// body isn't parsed yet at the top of the stack. It also runs after CORS so
+// that a rejected request still carries CORS headers and the browser can
+// read the 429 instead of reporting an opaque network error.
+app.use(globalLimiter);
 
 // ---------------------------------------------------------------------------
 // Health check

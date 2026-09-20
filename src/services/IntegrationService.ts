@@ -3,7 +3,7 @@
 import { randomBytes } from "crypto";
 import { ProviderFactory } from "../factories/ProviderFactory.js";
 import { ProviderAdapter } from "../adapters/ProviderAdapter.js";
-import { IntegrationRepository } from "../repositories/IntegrationRepository.js";
+import { IntegrationRepository, ConsumeNonceResult } from "../repositories/IntegrationRepository.js";
 import { Integration } from "../models/Integration.js";
 import { RepositoryPreview } from "../types/RepositoryPreview.js";
 import { OAuthState } from "../types/OAuthState.js";
@@ -28,8 +28,19 @@ import { env } from "../config/env.js";
  *   • Least privilege: adapters request minimum OAuth scopes.
  *   • Duplicate prevention: won't create a second ACTIVE connection to the
  *     same repo for the same user.
- *   • CSRF protection: OAuth state includes a one-time nonce.
+ *   • CSRF protection: the OAuth state carries a one-time nonce that is
+ *     stored on the PENDING row and verified + consumed on callback (see
+ *     IntegrationRepository.consumeOAuthNonce).
  */
+
+/**
+ * How long an OAuth authorization may stay open. The user is redirected to
+ * the provider, approves, and comes straight back — this is seconds of real
+ * interaction, so ten minutes is already generous, and it bounds how long a
+ * stolen/abandoned state parameter stays usable.
+ */
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
 export class IntegrationService {
 
     private readonly integrationRepository: IntegrationRepository;
@@ -113,27 +124,37 @@ export class IntegrationService {
             await this.integrationRepository.updateStatus(existing.id, "REVOKED");
         }
 
-        // Normalise the URL (strip .git suffix, trailing slash)
-        const normalizedUrl = repositoryUrl
-            .trim()
-            .replace(/\.git$/u, "")
-            .replace(/\/+$/u, "");
+        // Normalise the URL (strip trailing slashes, then the .git suffix).
+        // Delegated to the parser rather than repeated here: this used to be
+        // its own copy of the same two replaces in the wrong order, which
+        // stored "…/shop.git" as the canonical URL for any input ending in
+        // ".git/".
+        const normalizedUrl = RepositoryUrlParser.normalize(repositoryUrl);
+
+        // The CSRF nonce: 16 random bytes, stored on the row below and
+        // required (and destroyed) by the callback. Generated here rather
+        // than in the repository so the same value can go into both the
+        // database and the state parameter.
+        const nonce = randomBytes(16).toString("hex");
 
         // Create the PENDING row before redirecting — this allows us to
-        // correlate the OAuth callback with the correct repository.
+        // correlate the OAuth callback with the correct repository, and is
+        // where the nonce lives until the callback consumes it.
         const integration = await this.integrationRepository.createPending(
             userId,
             parsed.provider,
             normalizedUrl,
             parsed.owner,
-            parsed.repository
+            parsed.repository,
+            nonce,
+            new Date(Date.now() + OAUTH_STATE_TTL_MS)
         );
 
         // Build the OAuth state: integrationId + provider + CSRF nonce
         const oauthState: OAuthState = {
             integrationId: integration.id,
             provider:      parsed.provider,
-            nonce:         randomBytes(16).toString("hex")
+            nonce
         };
 
         const encodedState = Buffer
@@ -179,23 +200,21 @@ export class IntegrationService {
             );
         }
 
-        // Load the pending integration to validate it exists
-        const pendingIntegration = await this.integrationRepository.findById(
-            oauthState.integrationId
+        // CSRF gate. Verifies the nonce against the one stored when this
+        // flow started and consumes it in the same transaction, so a
+        // forged state, a replayed callback, or an expired session all
+        // stop here — before any authorization code is exchanged.
+        //
+        // This also subsumes the existence/status checks that used to live
+        // here: it's a single locked read rather than a separate read that
+        // another request could invalidate before the write.
+        const consumed = await this.integrationRepository.consumeOAuthNonce(
+            oauthState.integrationId,
+            oauthState.nonce
         );
 
-        if (!pendingIntegration) {
-            throw new AppError(
-                "Integration not found. The authorization session may have expired.",
-                404
-            );
-        }
-
-        if (pendingIntegration.status !== "PENDING") {
-            throw new AppError(
-                `Integration is already in '${pendingIntegration.status}' status.`,
-                409
-            );
+        if (consumed !== "consumed") {
+            throw this.oauthStateError(consumed);
         }
 
         // Use the provider from the state (avoids an extra DB read just to get the provider)
@@ -330,8 +349,42 @@ export class IntegrationService {
     // -----------------------------------------------------------------------
 
     /**
+     * Maps a failed nonce consumption to an HTTP error.
+     *
+     * `invalid` covers a wrong nonce, an expired session, and a replayed
+     * callback alike — they're deliberately indistinguishable to the
+     * caller, so probing the endpoint reveals nothing. `not_found` and
+     * `not_pending` stay distinct because they aid legitimate debugging
+     * and disclose nothing an attacker couldn't already infer: the
+     * integration ID came from their own browser's URL.
+     */
+    private oauthStateError(result: ConsumeNonceResult): AppError {
+        switch (result) {
+            case "not_found":
+                return new AppError(
+                    "Integration not found. The authorization session may have expired.",
+                    404
+                );
+            case "not_pending":
+                return new AppError(
+                    "This authorization has already been completed or revoked.",
+                    409
+                );
+            default:
+                return new AppError(
+                    "Invalid or expired authorization session. Please start again.",
+                    400
+                );
+        }
+    }
+
+    /**
      * Decodes and validates the base64url-encoded OAuth state parameter.
      * Throws a 400 error if the state is malformed or missing required fields.
+     *
+     * Note this only checks *shape* — the state is unsigned base64url, so
+     * anyone can produce a well-formed one. Authenticity comes entirely
+     * from the nonce check in consumeOAuthNonce.
      */
     private decodeOAuthState(state: string): OAuthState {
         if (!state || typeof state !== "string") {

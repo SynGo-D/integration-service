@@ -3,6 +3,7 @@
 import { Router } from "express";
 import { IntegrationController } from "../controllers/IntegrationController.js";
 import { validateAuthorizeRequest, validateUUIDParam } from "../middleware/validation.js";
+import { authorizeLimiter, oauthCallbackLimiter } from "../middleware/rateLimit.js";
 
 /**
  * Mounts all integration-related routes onto the provided router.
@@ -32,15 +33,19 @@ export function createIntegrationRoutes(
 ): Router {
     const router = Router();
 
-    // OAuth flow — order matters: static paths before dynamic params
+    // OAuth flow — order matters: static paths before dynamic params.
+    // Rate limiters sit before validation so a flood is rejected as cheaply
+    // as possible, without parsing or touching the database.
     router.post(
         "/authorize",
+        authorizeLimiter,
         validateAuthorizeRequest,
         (req, res) => controller.authorize(req, res)
     );
 
     router.get(
         "/:provider/oauth/callback",
+        oauthCallbackLimiter,
         (req, res) => controller.oauthCallback(req, res)
     );
 
