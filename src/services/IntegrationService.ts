@@ -392,24 +392,52 @@ export class IntegrationService {
         provider:           string,
         repositoryFullName: string
     ): Promise<{ secrets: string[]; legacy: boolean }> {
-        if (provider !== "github" && provider !== "gitlab") {
-            throw new ValidationError("provider must be 'github' or 'gitlab'.");
-        }
+        const { owner, name } = parseRepository(provider, repositoryFullName);
 
-        const slash = repositoryFullName.lastIndexOf("/");
-        if (slash <= 0 || slash === repositoryFullName.length - 1) {
-            throw new ValidationError("repository must be in 'owner/name' form.");
-        }
-
-        const owner = repositoryFullName.slice(0, slash);
-        const name  = repositoryFullName.slice(slash + 1);
-
-        const stored = await this.integrationRepository.findActiveWebhookSecrets(provider, owner, name);
+        const stored = await this.integrationRepository.findActiveWebhookSecrets(
+            provider as "github" | "gitlab", owner, name
+        );
 
         return {
             secrets: stored.filter((s): s is string => s !== null),
             legacy:  stored.some((s) => s === null)
         };
+    }
+
+    /**
+     * A currently valid access token for cloning a connected repository,
+     * for analysis-engine (internal route only). Returns null when nobody
+     * has an active integration for it: the caller then clones anonymously,
+     * which works for public repositories.
+     *
+     * Several users may have connected the same repository; each is tried
+     * in turn, so one user's revoked access doesn't block analysis while
+     * another user's integration still works.
+     */
+    async getRepositoryAccessToken(
+        provider:           string,
+        repositoryFullName: string
+    ): Promise<{ token: string; expiresAt: string | null } | null> {
+        const { owner, name } = parseRepository(provider, repositoryFullName);
+        const integrations = await this.integrationRepository.findActiveByRepository(
+            provider as "github" | "gitlab", owner, name
+        );
+
+        for (const integration of integrations) {
+            try {
+                const token = await this.getValidAccessToken(integration);
+                const expiresAt = integration.tokenExpiresAt && token === integration.accessToken
+                    ? integration.tokenExpiresAt.toISOString()
+                    : null;
+                return { token, expiresAt };
+            } catch (error) {
+                if (!(error instanceof AppError)) {
+                    throw error;
+                }
+                // Expired or unrenewable: already marked EXPIRED; try the next one.
+            }
+        }
+        return null;
     }
 
     // -----------------------------------------------------------------------
@@ -556,4 +584,20 @@ export class IntegrationService {
             throw new AppError("Invalid or tampered OAuth state.", 400);
         }
     }
+}
+
+/**
+ * Validates a provider name and splits "owner/name". GitLab full names can
+ * contain nested groups (`group/sub/repo`), so the split is on the *last*
+ * slash, matching RepositoryUrlParser.
+ */
+function parseRepository(provider: string, repositoryFullName: string): { owner: string; name: string } {
+    if (provider !== "github" && provider !== "gitlab") {
+        throw new ValidationError("provider must be 'github' or 'gitlab'.");
+    }
+    const slash = repositoryFullName.lastIndexOf("/");
+    if (slash <= 0 || slash === repositoryFullName.length - 1) {
+        throw new ValidationError("repository must be in 'owner/name' form.");
+    }
+    return { owner: repositoryFullName.slice(0, slash), name: repositoryFullName.slice(slash + 1) };
 }

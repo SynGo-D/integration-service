@@ -46,6 +46,7 @@ analysis happen.
 | **3. Callback** | `GET /api/integrations/:provider/oauth/callback` | Verify + consume the nonce, exchange the code for a token, encrypt and store it, flip to `ACTIVE`, register the webhook, redirect to the frontend. |
 | **4. Manage** | `GET`/`DELETE /api/integrations` | List, fetch, revoke. Revoking also removes the provider-side webhook. |
 | **Internal** | `GET /internal/webhook-secrets?provider=&repository=` | For `webhook-listener` only (bearer `INTERNAL_SERVICE_TOKEN`). Returns the webhook secrets of the repository's `ACTIVE` integrations, or none if it isn't connected. |
+| **Internal** | `GET /internal/repository-token?provider=&repository=` | For `analysis-engine` only (bearer `INTERNAL_SERVICE_TOKEN`). Returns a currently valid OAuth token of an `ACTIVE` integration of the repository (refreshed first if it's about to expire), for cloning private repositories; 404 if nobody connected it. `Cache-Control: no-store`. |
 
 Integration lifecycle: `PENDING → ACTIVE → REVOKED` (plus `EXPIRED`, which
 nothing sets yet — see Known gaps).

@@ -392,6 +392,30 @@ export class IntegrationRepository {
         );
     }
 
+    /**
+     * Every ACTIVE integration of one repository, tokens decrypted, most
+     * recently updated first (its token is the likeliest to still be valid).
+     * Several users can connect the same repository.
+     */
+    async findActiveByRepository(
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Integration[]> {
+        const result = await pool.query(
+            `SELECT *
+             FROM integrations
+             WHERE provider = $1
+               AND lower(repository_owner) = lower($2)
+               AND lower(repository_name)  = lower($3)
+               AND status = 'ACTIVE'
+             ORDER BY updated_at DESC;`,
+            [provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.map((row) => this.mapRow(row));
+    }
+
     async setWebhookId(id: string, providerWebhookId: string): Promise<void> {
         await pool.query(
             `UPDATE integrations
