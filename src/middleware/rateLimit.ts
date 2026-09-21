@@ -105,7 +105,11 @@ export const globalLimiter = rateLimit({
     keyGenerator: ipKey,
     standardHeaders: "draft-7",
     legacyHeaders: false,
-    skip: (req) => req.path === "/health",
+    // Health checks so monitoring never trips it; /internal because it is
+    // token-authenticated service-to-service traffic that all arrives from
+    // webhook-listener's single IP, and throttling it would reject real
+    // webhook deliveries.
+    skip: (req) => req.path === "/health" || req.path.startsWith("/internal"),
     message: tooManyRequests("Too many requests. Please slow down.")
 });
 

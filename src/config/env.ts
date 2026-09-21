@@ -68,14 +68,18 @@ export const env = {
     // not real deliveries; point this at a tunnel or public domain in front
     // of webhook-listener for real webhook delivery.
     //
-    // The two secrets MUST be the exact same values webhook-listener's own
-    // .env uses (GITHUB_WEBHOOK_SECRET / GITLAB_WEBHOOK_SECRET) — this
-    // service sets them when creating the hook, webhook-listener verifies
-    // deliveries against them; if they diverge, every delivery fails
-    // signature verification.
+    // No shared webhook secret any more: each integration gets its own,
+    // generated at registration (see IntegrationService.registerWebhook).
     // -----------------------------------------------------------------------
 
     WEBHOOK_LISTENER_URL: process.env.WEBHOOK_LISTENER_URL ?? "http://localhost:5002",
-    GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET ?? "",
-    GITLAB_WEBHOOK_SECRET: process.env.GITLAB_WEBHOOK_SECRET ?? "",
+
+    // -----------------------------------------------------------------------
+    // Service-to-service authentication for /internal/* routes.
+    // Must be the same value in webhook-listener's .env. Unset means the
+    // internal API refuses every request (fails closed).
+    // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    // -----------------------------------------------------------------------
+
+    INTERNAL_SERVICE_TOKEN: process.env.INTERNAL_SERVICE_TOKEN ?? "",
 };

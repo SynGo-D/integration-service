@@ -342,6 +342,56 @@ export class IntegrationRepository {
      * Records the provider-side webhook ID after successful registration.
      * Called by IntegrationService right after the adapter creates the hook.
      */
+    /**
+     * Stores this integration's own webhook secret, encrypted.
+     *
+     * Called *before* the provider hook is created, not after: GitHub sends
+     * a `ping` delivery the moment a hook exists, and webhook-listener can
+     * only verify it if the secret is already retrievable. Writing the
+     * secret first means a failed registration leaves an unused secret
+     * behind — harmless — rather than a live hook nobody can verify.
+     */
+    async setWebhookSecret(id: string, webhookSecret: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET webhook_secret = $1,
+                 updated_at     = NOW()
+             WHERE id = $2;`,
+            [encryptToken(webhookSecret), id]
+        );
+    }
+
+    /**
+     * Webhook secrets for every ACTIVE integration of one repository.
+     *
+     * Plural on purpose: two users can each connect the same repository,
+     * which registers two hooks, each signing its deliveries with its own
+     * secret. A delivery is genuine if it matches any of them.
+     *
+     * `null` entries are integrations registered before per-integration
+     * secrets existed; the caller decides whether to fall back to the old
+     * shared secret for those.
+     */
+    async findActiveWebhookSecrets(
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Array<string | null>> {
+        const result = await pool.query(
+            `SELECT webhook_secret
+             FROM integrations
+             WHERE provider = $1
+               AND lower(repository_owner) = lower($2)
+               AND lower(repository_name)  = lower($3)
+               AND status = 'ACTIVE';`,
+            [provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.map((row: { webhook_secret: string | null }) =>
+            row.webhook_secret ? decryptToken(row.webhook_secret) : null
+        );
+    }
+
     async setWebhookId(id: string, providerWebhookId: string): Promise<void> {
         await pool.query(
             `UPDATE integrations
