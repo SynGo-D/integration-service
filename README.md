@@ -45,6 +45,7 @@ analysis happen.
 | **2. Authorize** | `POST /api/integrations/authorize` | Create a `PENDING` row (with a CSRF nonce), return the provider's authorization URL. The row exists *before* the redirect so the callback can be correlated back to a repository. |
 | **3. Callback** | `GET /api/integrations/:provider/oauth/callback` | Verify + consume the nonce, exchange the code for a token, encrypt and store it, flip to `ACTIVE`, register the webhook, redirect to the frontend. |
 | **4. Manage** | `GET`/`DELETE /api/integrations` | List, fetch, revoke. Revoking also removes the provider-side webhook. |
+| **Internal** | `GET /internal/webhook-secrets?provider=&repository=` | For `webhook-listener` only (bearer `INTERNAL_SERVICE_TOKEN`). Returns the webhook secrets of the repository's `ACTIVE` integrations, or none if it isn't connected. |
 
 Integration lifecycle: `PENDING → ACTIVE → REVOKED` (plus `EXPIRED`, which
 nothing sets yet — see Known gaps).
@@ -79,6 +80,21 @@ row and verified in `IntegrationRepository.consumeOAuthNonce`, which locks
 the row, compares in constant time, and clears the nonce in the same
 transaction. That makes it single-use: a replayed callback fails.
 Authorization sessions expire after 10 minutes.
+
+**Each webhook has its own secret.** `registerWebhook` generates a random
+32-byte secret per integration and stores it encrypted, like the tokens,
+*before* creating the hook: GitHub sends a `ping` straight away, and
+`webhook-listener` must already be able to verify it. `webhook-listener`
+fetches the secrets from `/internal/webhook-secrets`. That route is
+protected by a shared bearer token (compared in constant time, and returns
+503 if no token is configured), sends `Cache-Control: no-store`, and is
+excluded from the public rate limiter. Integrations connected before
+migration 006 have no secret; the endpoint marks those `legacy: true` so
+`webhook-listener` can fall back to its old shared secret for them alone.
+
+> **Deployment requirement:** `/internal/*` must be reachable only from
+> other services, never from the public internet. The bearer token is a
+> second layer, not the only one.
 
 **Rate limiting is keyed by identity, not just IP** — because almost all
 traffic arrives from `main-backend`'s single IP, a naive per-IP limit
@@ -130,7 +146,7 @@ curl http://localhost:5001/health
 | `ENCRYPTION_KEY` | 32-byte hex key for token encryption |
 | `FRONTEND_ORIGIN` `FRONTEND_SUCCESS_URL` `FRONTEND_ERROR_URL` | CORS + post-OAuth redirects |
 | `WEBHOOK_LISTENER_URL` | Where registered webhooks deliver to |
-| `GITHUB_WEBHOOK_SECRET` `GITLAB_WEBHOOK_SECRET` | Must match `webhook-listener`'s values exactly |
+| `INTERNAL_SERVICE_TOKEN` | Shared with `webhook-listener` for `/internal/webhook-secrets` |
 
 ## Tests
 
@@ -147,6 +163,9 @@ Vitest, no infrastructure required — no database, no network.
 - **Token refresh** — expiry margins, refresh-token rotation, and the
   `EXPIRED` transitions, driven with a stub provider and controlled
   clocks because the real path only fires hours after a live connection
+- **Webhook secrets**: a fresh secret per hook, stored before the hook is registered,
+  nested GitLab namespaces, input validation, the `legacy` flag, and the internal route's
+  token check (missing or wrong → 401, unconfigured → 503)
 
 The adapters' HTTP calls and the repositories' SQL are **not** covered
 yet — they need HTTP and database mocking.
@@ -177,9 +196,6 @@ default, so it never fires, while **GitLab tokens last two hours**.
   they all leave from this server. `previewQuotaLimiter` rations it and
   fails with a clear message, but the real fix is to authenticate that
   call (raising the ceiling to 5,000/hour).
-- **One webhook secret for all repositories.** If `GITHUB_WEBHOOK_SECRET`
-  leaks, deliveries can be forged for every connected repo. Per-integration
-  secrets would contain the blast radius.
 - **`IntegrationController.ts:155`** has a type error (`req.query.state`
   is `string | string[]`); `npm run build` does not currently pass.
 - Only `integrations` and `users` tables remain — the unused Phase 0

@@ -267,11 +267,14 @@ export class IntegrationService {
 
     /**
      * Creates a provider-side webhook pointed at webhook-listener for the
-     * newly-connected repository, and records its ID. Skips silently (with
-     * a warning) if no shared secret is configured for the provider —
-     * matches this repo's existing pattern of leaving unconfigured
-     * providers (e.g. GitLab OAuth credentials) as inert placeholders
-     * rather than throwing at startup.
+     * newly-connected repository, signed with a secret unique to this
+     * integration, and records its ID.
+     *
+     * The per-integration secret replaces a single shared secret per
+     * provider. With one shared secret, leaking it let anyone forge a
+     * delivery for every connected repository; now a leak is contained to
+     * one. webhook-listener fetches it through the internal lookup endpoint
+     * (routes/InternalRoutes.ts) to verify each delivery.
      */
     private async registerWebhook(
         adapter: ProviderAdapter,
@@ -279,17 +282,12 @@ export class IntegrationService {
         accessToken: string,
         provider: "github" | "gitlab"
     ): Promise<void> {
-        const secret = provider === "github" ? env.GITHUB_WEBHOOK_SECRET : env.GITLAB_WEBHOOK_SECRET;
-
-        if (!secret) {
-            console.warn(
-                `Skipping webhook registration for integration ${integration.id}: ` +
-                `no webhook secret configured for provider '${provider}'.`
-            );
-            return;
-        }
+        const secret = randomBytes(32).toString("hex");
 
         try {
+            // Stored before the hook exists — see setWebhookSecret for why.
+            await this.integrationRepository.setWebhookSecret(integration.id, secret);
+
             const callbackUrl = `${env.WEBHOOK_LISTENER_URL}/webhooks/${provider}`;
             const { providerWebhookId } = await adapter.registerWebhook(
                 accessToken,
@@ -368,6 +366,50 @@ export class IntegrationService {
         }
 
         await this.integrationRepository.updateStatus(id, "REVOKED");
+    }
+
+    // -----------------------------------------------------------------------
+    // Webhook verification support (called by webhook-listener)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The secrets a delivery for `repositoryFullName` may be signed with.
+     *
+     * An empty `secrets` list with `legacy: false` means the repository has
+     * no active integration — webhook-listener rejects the delivery, which
+     * is what makes this lookup an allowlist as well as a key store.
+     *
+     * `legacy: true` means at least one active integration predates
+     * per-integration secrets; only then may webhook-listener fall back to
+     * the old shared secret. That fallback is scoped to repositories that
+     * genuinely need it, so a leaked shared secret can't be used against a
+     * repository connected after this change.
+     *
+     * GitLab full names can contain nested groups (`group/sub/repo`), so the
+     * split is on the *last* slash, matching RepositoryUrlParser.
+     */
+    async getWebhookSecrets(
+        provider:           string,
+        repositoryFullName: string
+    ): Promise<{ secrets: string[]; legacy: boolean }> {
+        if (provider !== "github" && provider !== "gitlab") {
+            throw new ValidationError("provider must be 'github' or 'gitlab'.");
+        }
+
+        const slash = repositoryFullName.lastIndexOf("/");
+        if (slash <= 0 || slash === repositoryFullName.length - 1) {
+            throw new ValidationError("repository must be in 'owner/name' form.");
+        }
+
+        const owner = repositoryFullName.slice(0, slash);
+        const name  = repositoryFullName.slice(slash + 1);
+
+        const stored = await this.integrationRepository.findActiveWebhookSecrets(provider, owner, name);
+
+        return {
+            secrets: stored.filter((s): s is string => s !== null),
+            legacy:  stored.some((s) => s === null)
+        };
     }
 
     // -----------------------------------------------------------------------

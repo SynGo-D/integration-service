@@ -11,6 +11,7 @@ import { RepositoryPreviewController } from "./controllers/RepositoryPreviewCont
 import { createIntegrationRoutes } from "./routes/IntegrationRoutes.js";
 import { createRepositoryPreviewRoutes } from "./routes/RepositoryPreviewRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
+import { createInternalRoutes } from "./routes/InternalRoutes.js";
 
 import { errorHandler } from "./middleware/errorHandler.js";
 import { globalLimiter } from "./middleware/rateLimit.js";
@@ -75,6 +76,10 @@ app.use("/api/integrations", createIntegrationRoutes(integrationController));
 
 // User management
 app.use("/api", userRoutes);
+
+// Service-to-service (webhook-listener). Token-authenticated, never
+// proxied by main-backend — see routes/InternalRoutes.ts.
+app.use("/internal", createInternalRoutes(integrationService));
 
 // ---------------------------------------------------------------------------
 // Global error handler (must be last)
