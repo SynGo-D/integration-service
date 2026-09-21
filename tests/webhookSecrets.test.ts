@@ -160,3 +160,65 @@ describe("webhook registration during the OAuth callback", () => {
         expect(calls).toEqual(["store-secret", "register"]);
     });
 });
+
+// ---------------------------------------------------------------------------
+// getRepositoryAccessToken — how analysis-engine clones private repositories.
+// ---------------------------------------------------------------------------
+
+describe("IntegrationService.getRepositoryAccessToken", () => {
+    const soon = () => new Date(Date.now() + 10 * 60_000);
+
+    function harness(integrations: object[], refresh?: () => Promise<unknown>) {
+        const repository = {
+            findActiveByRepository: vi.fn(async () => integrations),
+            updateTokens: vi.fn(async () => undefined),
+            updateStatus: vi.fn(async () => undefined),
+        };
+        const adapter = { refreshAccessToken: vi.fn(refresh ?? (async () => { throw new Error("revoked"); })) };
+        const factory: ProviderAdapterFactory = { create: () => adapter as unknown as ProviderAdapter };
+        return { service: new IntegrationService(repository as never, factory), repository, adapter };
+    }
+
+    it("returns the token of an active integration", async () => {
+        const { service } = harness([{ id: "a", provider: "github", accessToken: "gho_live", tokenExpiresAt: null }]);
+
+        expect(await service.getRepositoryAccessToken("github", "acme/shop"))
+            .toEqual({ token: "gho_live", expiresAt: null });
+    });
+
+    it("refreshes a token that's about to expire before handing it out", async () => {
+        const { service, repository } = harness(
+            [{ id: "a", provider: "gitlab", accessToken: "old", refreshToken: "r1", tokenExpiresAt: new Date(Date.now() + 10_000) }],
+            async () => ({ accessToken: "fresh", refreshToken: "r2", expiresAt: soon().toISOString() })
+        );
+
+        const access = await service.getRepositoryAccessToken("gitlab", "group/sub/shop");
+
+        expect(access?.token).toBe("fresh");
+        expect(repository.updateTokens).toHaveBeenCalledOnce();
+        expect(repository.findActiveByRepository).toHaveBeenCalledWith("gitlab", "group/sub", "shop");
+    });
+
+    it("skips an integration whose access was revoked and uses the next one", async () => {
+        const { service, repository } = harness([
+            { id: "revoked", provider: "github", accessToken: "x", refreshToken: "r", tokenExpiresAt: new Date(Date.now() - 1) },
+            { id: "ok", provider: "github", accessToken: "gho_second_user", tokenExpiresAt: null },
+        ]);
+
+        expect((await service.getRepositoryAccessToken("github", "acme/shop"))?.token).toBe("gho_second_user");
+        expect(repository.updateStatus).toHaveBeenCalledWith("revoked", "EXPIRED");
+    });
+
+    it("returns null when nobody has connected the repository, so the engine clones anonymously", async () => {
+        const { service } = harness([]);
+
+        expect(await service.getRepositoryAccessToken("github", "acme/public-lib")).toBeNull();
+    });
+
+    it.each([["bitbucket", "acme/shop"], ["github", "noslash"], ["github", "acme/"]])(
+        "rejects invalid input (%s, %s)",
+        async (provider, repository) => {
+            await expect(harness([]).service.getRepositoryAccessToken(provider, repository)).rejects.toThrow();
+        }
+    );
+});
