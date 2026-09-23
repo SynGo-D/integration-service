@@ -68,6 +68,13 @@ export const env = {
     // not real deliveries; point this at a tunnel or public domain in front
     // of webhook-listener for real webhook delivery.
     //
+    // This is the address GITHUB will call, not an address this service
+    // calls, so it must be reachable from the internet. Setting it to an
+    // internal name — a container hostname, a cluster service, localhost —
+    // makes registration fail and leaves the repository connected with no
+    // hook, which looks like a working integration that never reviews
+    // anything.
+    //
     // No shared webhook secret any more: each integration gets its own,
     // generated at registration (see IntegrationService.registerWebhook).
     // -----------------------------------------------------------------------
