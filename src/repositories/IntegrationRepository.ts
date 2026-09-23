@@ -79,7 +79,9 @@ export class IntegrationRepository {
         repositoryOwner: string,
         repositoryName:  string,
         oauthNonce:      string,
-        oauthExpiresAt:  Date
+        oauthExpiresAt:  Date,
+        organizationId:  string,
+        projectId:       string | null
     ): Promise<Integration> {
 
         const id = randomUUID();
@@ -95,11 +97,13 @@ export class IntegrationRepository {
                 access_token,
                 oauth_nonce,
                 oauth_expires_at,
+                organization_id,
+                project_id,
                 status,
                 created_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', NOW(), NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'PENDING', NOW(), NOW())
             RETURNING *;
         `;
 
@@ -116,7 +120,9 @@ export class IntegrationRepository {
             repositoryName,
             placeholderToken,
             oauthNonce,
-            oauthExpiresAt
+            oauthExpiresAt,
+            organizationId,
+            projectId
         ]);
 
         return this.mapRow(result.rows[0]);
@@ -397,6 +403,44 @@ export class IntegrationRepository {
      * recently updated first (its token is the likeliest to still be valid).
      * Several users can connect the same repository.
      */
+    /**
+     * Every connection an organization owns (revoked ones excluded), for
+     * the organization's repository list. Access is decided by membership,
+     * not by who connected each repository.
+     */
+    async findByOrganization(organizationId: string, projectId?: string | null): Promise<Integration[]> {
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE organization_id = $1
+               AND status <> 'REVOKED'
+               AND ($2::uuid IS NULL OR project_id = $2)
+             ORDER BY repository_owner, repository_name;`,
+            [organizationId, projectId ?? null]
+        );
+
+        return result.rows.map((row) => this.mapRow(row));
+    }
+
+    /** An organization's active connection for one repository, if it has one. */
+    async findActiveInOrganization(
+        organizationId:  string,
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Integration | null> {
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE organization_id = $1 AND provider = $2
+               AND lower(repository_owner) = lower($3)
+               AND lower(repository_name) = lower($4)
+               AND status = 'ACTIVE'
+             LIMIT 1;`,
+            [organizationId, provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
+    }
+
     async findActiveByRepository(
         provider:        "github" | "gitlab",
         repositoryOwner: string,

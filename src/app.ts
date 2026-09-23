@@ -12,6 +12,9 @@ import { createIntegrationRoutes } from "./routes/IntegrationRoutes.js";
 import { createRepositoryPreviewRoutes } from "./routes/RepositoryPreviewRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import { createInternalRoutes } from "./routes/InternalRoutes.js";
+import { createOrganizationRoutes } from "./routes/OrganizationRoutes.js";
+import { OrganizationController } from "./controllers/OrganizationController.js";
+import { OrganizationService } from "./services/OrganizationService.js";
 
 import { errorHandler } from "./middleware/errorHandler.js";
 import { globalLimiter } from "./middleware/rateLimit.js";
@@ -73,6 +76,8 @@ app.use("/api/repositories", createRepositoryPreviewRoutes(repositoryPreviewCont
 
 // All integration endpoints: authorize, oauth/callback, list, getById, revoke
 app.use("/api/integrations", createIntegrationRoutes(integrationController));
+
+app.use("/api/organizations", createOrganizationRoutes(new OrganizationController(new OrganizationService())));
 
 // User management
 app.use("/api", userRoutes);
