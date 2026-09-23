@@ -9,6 +9,7 @@ import { RepositoryPreview } from "../types/RepositoryPreview.js";
 import { OAuthState } from "../types/OAuthState.js";
 import { AppError } from "../errors/AppError.js";
 import { ValidationError } from "../errors/ValidationError.js";
+import { OrganizationService } from "./OrganizationService.js";
 import { RepositoryUrlParser } from "../utils/RepositoryUrlParser.js";
 import { env } from "../config/env.js";
 
@@ -62,14 +63,17 @@ export class IntegrationService {
 
     private readonly integrationRepository: IntegrationRepository;
     private readonly providerFactory: ProviderAdapterFactory;
+    private readonly organizationService: OrganizationService;
 
     constructor(
         integrationRepository?: IntegrationRepository,
-        providerFactory?: ProviderAdapterFactory
+        providerFactory?: ProviderAdapterFactory,
+        organizationService?: OrganizationService
     ) {
         this.integrationRepository =
             integrationRepository ?? new IntegrationRepository();
         this.providerFactory = providerFactory ?? ProviderFactory;
+        this.organizationService = organizationService ?? new OrganizationService();
     }
 
     // -----------------------------------------------------------------------
@@ -106,8 +110,10 @@ export class IntegrationService {
      * @returns An object containing the integration ID and the redirect URL.
      */
     async initiateOAuth(
-        userId:        string,
-        repositoryUrl: string
+        userId:         string,
+        repositoryUrl:  string,
+        organizationId: string,
+        projectId:      string | null = null
     ): Promise<{ integrationId: string; authorizationUrl: string }> {
 
         // Validate inputs
@@ -116,6 +122,17 @@ export class IntegrationService {
         }
         if (!repositoryUrl || typeof repositoryUrl !== "string") {
             throw new ValidationError("repositoryUrl is required.");
+        }
+        if (!organizationId || typeof organizationId !== "string") {
+            throw new ValidationError("organizationId is required.");
+        }
+
+        // A repository belongs to the organization, so connecting one is a
+        // manager's job, and the project it is filed under must be the
+        // organization's own.
+        await this.organizationService.requireRole(organizationId, userId, "MANAGER");
+        if (projectId) {
+            await this.organizationService.assertProjectInOrganization(organizationId, projectId);
         }
 
         // Parse URL → detect provider + extract owner/name
@@ -126,6 +143,22 @@ export class IntegrationService {
         // row, so PENDING/EXPIRED rows must be handled here too, not just
         // ACTIVE ones — otherwise a re-authorize attempt after an abandoned
         // OAuth flow would hit a raw DB constraint violation.
+        // Organization-wide, not per user: two members connecting the same
+        // repository would mean two webhooks and two analyses of every PR.
+        const connected = await this.integrationRepository.findActiveInOrganization(
+            organizationId,
+            parsed.provider,
+            parsed.owner,
+            parsed.repository
+        );
+
+        if (connected) {
+            throw new AppError(
+                `${parsed.owner}/${parsed.repository} is already connected to this organization.`,
+                409
+            );
+        }
+
         const existing = await this.integrationRepository.findConnectionByUserAndRepo(
             userId,
             parsed.provider,
@@ -169,7 +202,9 @@ export class IntegrationService {
             parsed.owner,
             parsed.repository,
             nonce,
-            new Date(Date.now() + OAUTH_STATE_TTL_MS)
+            new Date(Date.now() + OAUTH_STATE_TTL_MS),
+            organizationId,
+            projectId
         );
 
         // Build the OAuth state: integrationId + provider + CSRF nonce
@@ -319,6 +354,20 @@ export class IntegrationService {
             throw new ValidationError("userId is required.");
         }
         return this.integrationRepository.findByUser(userId);
+    }
+
+    /**
+     * An organization's connected repositories, optionally narrowed to one
+     * project. Any member may read them; the membership check is what
+     * keeps one tenant out of another's list.
+     */
+    async getOrganizationIntegrations(
+        organizationId: string,
+        userId:         string,
+        projectId?:     string | null
+    ): Promise<Integration[]> {
+        await this.organizationService.requireMember(organizationId, userId);
+        return this.integrationRepository.findByOrganization(organizationId, projectId ?? null);
     }
 
     /**

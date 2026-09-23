@@ -78,22 +78,26 @@ export class IntegrationController {
      */
     authorize = async (req: Request, res: Response): Promise<void> => {
         try {
-            const { userId, repositoryUrl } = req.body as {
-                userId:        string;
+            const { userId, repositoryUrl, organizationId, projectId } = req.body as {
+                userId:         string;
+                organizationId: string;
+                projectId?:     string | null;
                 repositoryUrl: string;
             };
 
-            if (!userId || !repositoryUrl) {
+            if (!userId || !repositoryUrl || !organizationId) {
                 res.status(400).json({
                     success: false,
-                    message: "userId and repositoryUrl are required."
+                    message: "userId, repositoryUrl and organizationId are required."
                 });
                 return;
             }
 
             const result = await this.integrationService.initiateOAuth(
                 userId,
-                repositoryUrl
+                repositoryUrl,
+                organizationId,
+                projectId ?? null
             );
 
             res.status(200).json({
@@ -126,7 +130,9 @@ export class IntegrationController {
      * On failure: redirects the user to FRONTEND_ERROR_URL.
      */
     oauthCallback = async (req: Request, res: Response): Promise<void> => {
-        const provider = req.params.provider;
+        // Express 5 types route params as string | string[]; this route
+        // declares :provider once, so it is always the single value.
+        const provider = String(req.params.provider ?? "");
         const code  = req.query.code  as string | undefined;
         const state = req.query.state as string | undefined;
 
@@ -179,14 +185,20 @@ export class IntegrationController {
     // -----------------------------------------------------------------------
 
     /**
-     * GET /api/integrations?userId=<uuid>
+     * GET /api/integrations?userId=<uuid>[&organizationId=<uuid>][&projectId=<uuid>]
      *
-     * Returns all integrations for a user.
+     * With organizationId: every repository that organization has
+     * connected, optionally narrowed to one project — any member may read
+     * them. Without it: only what this user connected themselves, which is
+     * what the pre-multi-tenant clients ask for.
+     *
      * Tokens are stripped from the response — never returned to the client.
      */
     list = async (req: Request, res: Response): Promise<void> => {
         try {
             const userId = req.query.userId as string;
+            const organizationId = typeof req.query.organizationId === "string" ? req.query.organizationId : "";
+            const projectId = typeof req.query.projectId === "string" ? req.query.projectId : null;
 
             if (!userId) {
                 res.status(400).json({
@@ -196,7 +208,9 @@ export class IntegrationController {
                 return;
             }
 
-            const integrations = await this.integrationService.getIntegrations(userId);
+            const integrations = organizationId
+                ? await this.integrationService.getOrganizationIntegrations(organizationId, userId, projectId)
+                : await this.integrationService.getIntegrations(userId);
 
             res.status(200).json({
                 success: true,
