@@ -1,0 +1,563 @@
+// src/repositories/IntegrationRepository.ts
+
+import { randomUUID, timingSafeEqual } from "crypto";
+import { pool } from "../config/database.js";
+import { Integration } from "../models/Integration.js";
+import { encryptToken, decryptToken } from "../utils/crypto.js";
+
+/**
+ * Outcome of verifying and consuming an OAuth nonce.
+ *
+ * Deliberately does not distinguish "wrong nonce" from "expired nonce" —
+ * both collapse to `invalid`, so a caller probing the callback endpoint
+ * learns nothing about which part of a forged state was wrong.
+ */
+export type ConsumeNonceResult =
+    | "consumed"
+    | "not_found"
+    | "not_pending"
+    | "invalid";
+
+/**
+ * Data-access layer for the `integrations` table.
+ *
+ * Responsibilities:
+ *  • Create PENDING integration rows (before OAuth)
+ *  • Promote to ACTIVE after successful OAuth token exchange
+ *  • Read integrations by user / by ID
+ *  • Update status (EXPIRED, REVOKED)
+ *
+ * Token security:
+ *  • Access and refresh tokens are ALWAYS stored encrypted (AES-256-GCM).
+ *  • They are ALWAYS decrypted before being returned to the service layer.
+ *  • The raw plaintext token never touches the database.
+ */
+export class IntegrationRepository {
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /** Maps a raw PostgreSQL row to the Integration domain model. */
+    private mapRow(row: any): Integration {
+        return {
+            id:               row.id,
+            userId:           row.user_id,
+            provider:         row.provider,
+            repositoryUrl:    row.repository_url,
+            repositoryOwner:  row.repository_owner,
+            repositoryName:   row.repository_name,
+            accessToken:      row.access_token  ? decryptToken(row.access_token)  : "",
+            refreshToken:     row.refresh_token ? decryptToken(row.refresh_token) : undefined,
+            tokenExpiresAt:   row.token_expires_at ? new Date(row.token_expires_at) : undefined,
+            providerUserId:   row.provider_user_id   ?? undefined,
+            providerUsername: row.provider_username  ?? undefined,
+            status:           row.status,
+            providerWebhookId:   row.provider_webhook_id ?? undefined,
+            webhookRegisteredAt: row.webhook_registered_at ? new Date(row.webhook_registered_at) : undefined,
+            createdAt:        new Date(row.created_at),
+            updatedAt:        new Date(row.updated_at)
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Write operations
+    // -----------------------------------------------------------------------
+
+    /**
+     * Creates a PENDING integration row.
+     * Called when the user confirms the repository preview and clicks "Authorize"
+     * — before we have OAuth tokens.
+     *
+     * The access_token column is required (NOT NULL) so we store a placeholder
+     * that is replaced by `activateIntegration` after OAuth completes.
+     */
+    async createPending(
+        userId:          string,
+        provider:        "github" | "gitlab",
+        repositoryUrl:   string,
+        repositoryOwner: string,
+        repositoryName:  string,
+        oauthNonce:      string,
+        oauthExpiresAt:  Date,
+        organizationId:  string,
+        projectId:       string | null
+    ): Promise<Integration> {
+
+        const id = randomUUID();
+
+        const query = `
+            INSERT INTO integrations (
+                id,
+                user_id,
+                provider,
+                repository_url,
+                repository_owner,
+                repository_name,
+                access_token,
+                oauth_nonce,
+                oauth_expires_at,
+                organization_id,
+                project_id,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'PENDING', NOW(), NOW())
+            RETURNING *;
+        `;
+
+        // Placeholder token — replaced when OAuth completes.
+        // We encrypt a known sentinel rather than storing an empty string.
+        const placeholderToken = encryptToken("__PENDING__");
+
+        const result = await pool.query(query, [
+            id,
+            userId,
+            provider,
+            repositoryUrl,
+            repositoryOwner,
+            repositoryName,
+            placeholderToken,
+            oauthNonce,
+            oauthExpiresAt,
+            organizationId,
+            projectId
+        ]);
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Verifies the OAuth nonce for a PENDING integration and consumes it in
+     * the same transaction.
+     *
+     * This is the CSRF gate for the OAuth callback. Three properties matter:
+     *
+     *   • Atomic — the row is locked with SELECT ... FOR UPDATE, so two
+     *     concurrent callbacks for the same integration can't both pass the
+     *     check before either clears the nonce.
+     *   • One-time — the nonce is set to NULL on success, so replaying the
+     *     same callback URL (from browser history, a proxy log, or a
+     *     Referer header) fails.
+     *   • Constant-time — compared with timingSafeEqual rather than `=`, so
+     *     the comparison itself reveals nothing about how much of a guessed
+     *     nonce was correct.
+     *
+     * The nonce is intentionally never surfaced on the Integration model —
+     * nothing outside this method can read it, so it cannot leak through an
+     * API response by accident.
+     */
+    async consumeOAuthNonce(id: string, nonce: string): Promise<ConsumeNonceResult> {
+        const client = await pool.connect();
+
+        try {
+            await client.query("BEGIN");
+
+            const result = await client.query(
+                `SELECT status, oauth_nonce, oauth_expires_at
+                 FROM integrations
+                 WHERE id = $1
+                 FOR UPDATE;`,
+                [id]
+            );
+
+            if (result.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return "not_found";
+            }
+
+            const row = result.rows[0];
+
+            if (row.status !== "PENDING") {
+                await client.query("ROLLBACK");
+                return "not_pending";
+            }
+
+            // A NULL nonce means this flow was already completed — the
+            // success path clears it.
+            if (!row.oauth_nonce || !row.oauth_expires_at) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            if (new Date(row.oauth_expires_at).getTime() <= Date.now()) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            if (!this.nonceMatches(row.oauth_nonce, nonce)) {
+                await client.query("ROLLBACK");
+                return "invalid";
+            }
+
+            await client.query(
+                `UPDATE integrations
+                 SET oauth_nonce      = NULL,
+                     oauth_expires_at = NULL,
+                     updated_at       = NOW()
+                 WHERE id = $1;`,
+                [id]
+            );
+
+            await client.query("COMMIT");
+            return "consumed";
+
+        } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+        } finally {
+            client.release();
+        }
+    }
+
+    /**
+     * Constant-time nonce comparison.
+     *
+     * timingSafeEqual throws on length mismatch, so lengths are checked
+     * first — that leaks only the length of a fixed-format value the
+     * attacker already knows, not any of its content.
+     */
+    private nonceMatches(stored: string, provided: string): boolean {
+        const storedBuffer   = Buffer.from(stored, "utf8");
+        const providedBuffer = Buffer.from(provided, "utf8");
+
+        if (storedBuffer.length !== providedBuffer.length) {
+            return false;
+        }
+
+        return timingSafeEqual(storedBuffer, providedBuffer);
+    }
+
+    /**
+     * Promotes a PENDING integration to ACTIVE after OAuth succeeds.
+     * Stores encrypted access/refresh tokens and the provider user identity.
+     *
+     * Uses a transaction-safe UPDATE with RETURNING to confirm the row exists
+     * and belongs to the correct user before any token is persisted.
+     */
+    async activateIntegration(
+        id:               string,
+        accessToken:      string,
+        refreshToken:     string | undefined,
+        tokenExpiresAt:   Date   | undefined,
+        providerUserId:   string,
+        providerUsername: string
+    ): Promise<Integration> {
+
+        const query = `
+            UPDATE integrations
+            SET
+                access_token      = $1,
+                refresh_token     = $2,
+                token_expires_at  = $3,
+                provider_user_id  = $4,
+                provider_username = $5,
+                status            = 'ACTIVE',
+                updated_at        = NOW()
+            WHERE id     = $6
+              AND status = 'PENDING'
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, [
+            encryptToken(accessToken),
+            refreshToken ? encryptToken(refreshToken) : null,
+            tokenExpiresAt ?? null,
+            providerUserId,
+            providerUsername,
+            id
+        ]);
+
+        if (result.rows.length === 0) {
+            throw new Error(
+                `Integration ${id} not found or is not in PENDING status.`
+            );
+        }
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Replaces the stored credentials after a successful token refresh.
+     *
+     * `refreshToken` is overwritten rather than preserved when the provider
+     * returns a new one, because both GitHub and GitLab rotate them — the
+     * token just used is dead, so keeping the old value would break the
+     * next refresh. Passing `undefined` leaves the existing one in place
+     * for the rare provider that doesn't rotate.
+     */
+    async updateTokens(
+        id:             string,
+        accessToken:    string,
+        refreshToken:   string | undefined,
+        tokenExpiresAt: Date   | undefined
+    ): Promise<Integration> {
+
+        const query = `
+            UPDATE integrations
+            SET access_token     = $1,
+                refresh_token    = COALESCE($2, refresh_token),
+                token_expires_at = $3,
+                status           = 'ACTIVE',
+                updated_at       = NOW()
+            WHERE id = $4
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, [
+            encryptToken(accessToken),
+            refreshToken ? encryptToken(refreshToken) : null,
+            tokenExpiresAt ?? null,
+            id
+        ]);
+
+        if (result.rows.length === 0) {
+            throw new Error(`Integration ${id} not found.`);
+        }
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Updates the lifecycle status of an integration (e.g. to EXPIRED or REVOKED).
+     */
+    async updateStatus(
+        id:     string,
+        status: Integration["status"]
+    ): Promise<Integration> {
+
+        const query = `
+            UPDATE integrations
+            SET status     = $1,
+                updated_at = NOW()
+            WHERE id = $2
+            RETURNING *;
+        `;
+
+        const result = await pool.query(query, [status, id]);
+
+        if (result.rows.length === 0) {
+            throw new Error(`Integration ${id} not found.`);
+        }
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Records the provider-side webhook ID after successful registration.
+     * Called by IntegrationService right after the adapter creates the hook.
+     */
+    /**
+     * Stores this integration's own webhook secret, encrypted.
+     *
+     * Called *before* the provider hook is created, not after: GitHub sends
+     * a `ping` delivery the moment a hook exists, and webhook-listener can
+     * only verify it if the secret is already retrievable. Writing the
+     * secret first means a failed registration leaves an unused secret
+     * behind — harmless — rather than a live hook nobody can verify.
+     */
+    async setWebhookSecret(id: string, webhookSecret: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET webhook_secret = $1,
+                 updated_at     = NOW()
+             WHERE id = $2;`,
+            [encryptToken(webhookSecret), id]
+        );
+    }
+
+    /**
+     * Webhook secrets for every ACTIVE integration of one repository.
+     *
+     * Plural on purpose: two users can each connect the same repository,
+     * which registers two hooks, each signing its deliveries with its own
+     * secret. A delivery is genuine if it matches any of them.
+     *
+     * `null` entries are integrations registered before per-integration
+     * secrets existed; the caller decides whether to fall back to the old
+     * shared secret for those.
+     */
+    async findActiveWebhookSecrets(
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Array<string | null>> {
+        const result = await pool.query(
+            `SELECT webhook_secret
+             FROM integrations
+             WHERE provider = $1
+               AND lower(repository_owner) = lower($2)
+               AND lower(repository_name)  = lower($3)
+               AND status = 'ACTIVE';`,
+            [provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.map((row: { webhook_secret: string | null }) =>
+            row.webhook_secret ? decryptToken(row.webhook_secret) : null
+        );
+    }
+
+    /**
+     * Every ACTIVE integration of one repository, tokens decrypted, most
+     * recently updated first (its token is the likeliest to still be valid).
+     * Several users can connect the same repository.
+     */
+    /**
+     * Every connection an organization owns (revoked ones excluded), for
+     * the organization's repository list. Access is decided by membership,
+     * not by who connected each repository.
+     */
+    async findByOrganization(organizationId: string, projectId?: string | null): Promise<Integration[]> {
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE organization_id = $1
+               AND status <> 'REVOKED'
+               AND ($2::uuid IS NULL OR project_id = $2)
+             ORDER BY repository_owner, repository_name;`,
+            [organizationId, projectId ?? null]
+        );
+
+        return result.rows.map((row) => this.mapRow(row));
+    }
+
+    /** An organization's active connection for one repository, if it has one. */
+    async findActiveInOrganization(
+        organizationId:  string,
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Integration | null> {
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE organization_id = $1 AND provider = $2
+               AND lower(repository_owner) = lower($3)
+               AND lower(repository_name) = lower($4)
+               AND status = 'ACTIVE'
+             LIMIT 1;`,
+            [organizationId, provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
+    }
+
+    async findActiveByRepository(
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Integration[]> {
+        const result = await pool.query(
+            `SELECT *
+             FROM integrations
+             WHERE provider = $1
+               AND lower(repository_owner) = lower($2)
+               AND lower(repository_name)  = lower($3)
+               AND status = 'ACTIVE'
+             ORDER BY updated_at DESC;`,
+            [provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.map((row) => this.mapRow(row));
+    }
+
+    async setWebhookId(id: string, providerWebhookId: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET provider_webhook_id   = $1,
+                 webhook_registered_at = NOW(),
+                 updated_at            = NOW()
+             WHERE id = $2;`,
+            [providerWebhookId, id]
+        );
+    }
+
+    /**
+     * Clears the stored webhook ID — called after the provider-side hook has
+     * been deleted (on revoke) or was found to have already been removed.
+     */
+    async clearWebhookId(id: string): Promise<void> {
+        await pool.query(
+            `UPDATE integrations
+             SET provider_webhook_id   = NULL,
+                 webhook_registered_at = NULL,
+                 updated_at            = NOW()
+             WHERE id = $1;`,
+            [id]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Read operations
+    // -----------------------------------------------------------------------
+
+    /**
+     * Finds an integration by its primary key.
+     * Returns null if no row matches.
+     */
+    async findById(id: string): Promise<Integration | null> {
+        const result = await pool.query(
+            `SELECT * FROM integrations WHERE id = $1 LIMIT 1;`,
+            [id]
+        );
+
+        if (result.rows.length === 0) return null;
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Returns all integrations for a user, most-recent first.
+     * Access tokens are decrypted before returning to the caller.
+     */
+    async findByUser(userId: string): Promise<Integration[]> {
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE user_id = $1
+             ORDER BY created_at DESC;`,
+            [userId]
+        );
+
+        return result.rows.map((row: any) => this.mapRow(row));
+    }
+
+    /**
+     * Finds the current non-revoked connection (if any) for a user/repo pair —
+     * whatever status it's in (PENDING, ACTIVE, or EXPIRED). There can be at
+     * most one, enforced by `idx_integrations_user_repo_unique`. Used to
+     * prevent duplicate connections and to detect stale/abandoned PENDING
+     * rows that would otherwise collide with that same unique index.
+     */
+    async findConnectionByUserAndRepo(
+        userId:          string,
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<Integration | null> {
+
+        const result = await pool.query(
+            `SELECT * FROM integrations
+             WHERE user_id          = $1
+               AND provider         = $2
+               AND repository_owner = $3
+               AND repository_name  = $4
+               AND status           != 'REVOKED'
+             LIMIT 1;`,
+            [userId, provider, repositoryOwner, repositoryName]
+        );
+
+        if (result.rows.length === 0) return null;
+
+        return this.mapRow(result.rows[0]);
+    }
+
+    /**
+     * Permanently removes an integration record.
+     * Prefer `updateStatus('REVOKED')` to preserve audit history.
+     */
+    async delete(id: string): Promise<void> {
+        await pool.query(
+            `DELETE FROM integrations WHERE id = $1;`,
+            [id]
+        );
+    }
+}

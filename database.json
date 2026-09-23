@@ -1,0 +1,5 @@
+{
+  "migration-file-language": "sql",
+  "migrations-dir": "database/migrations",
+  "database-url": "postgres://postgres:shen1234@localhost:5432/integration_service_db"
+}
