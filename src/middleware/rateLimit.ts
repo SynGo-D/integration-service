@@ -160,6 +160,35 @@ export const authorizeLimiter = rateLimit({
 });
 
 /**
+ * Sign-in and registration, keyed by the email address being tried.
+ *
+ * Keying on IP would be pointless here: every attempt arrives from
+ * main-backend's single address, so one bucket would cover the whole
+ * platform. Per-email is also the shape of the attack worth stopping —
+ * guessing one person's password — and it cannot be evaded by rotating
+ * addresses, since the address is the thing being attacked.
+ *
+ * 10 a minute is far above a person mistyping their own password and far
+ * below any useful guessing rate. A determined attacker can still try other
+ * accounts in parallel; passwords are hashed with scrypt (utils/password.ts)
+ * precisely because rate limiting alone is never the whole answer.
+ */
+export const signInLimiter = rateLimit({
+    windowMs: MINUTE,
+    limit: 10,
+    keyGenerator: (req: Request) => {
+        const email = (req.body as { email?: unknown } | undefined)?.email;
+
+        return typeof email === "string" && email.length > 0
+            ? `email:${email.trim().toLowerCase()}`
+            : ipKey(req);
+    },
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: tooManyRequests("Too many sign-in attempts. Please wait a minute and try again.")
+});
+
+/**
  * The OAuth callback is hit by the user's own browser, so IP is a real
  * identity here.
  *
