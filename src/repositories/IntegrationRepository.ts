@@ -441,6 +441,40 @@ export class IntegrationRepository {
         return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
     }
 
+    /**
+     * Whether `userId` may see a repository's data, by the only rule that
+     * grants it: they belong to an organization that has connected it.
+     *
+     * One query rather than "find the integrations, then check each
+     * organization": this runs on every repository request the gateway
+     * serves, and the answer is a single boolean the database can reach
+     * through its own indexes.
+     *
+     * REVOKED connections are excluded. Disconnecting a repository has to
+     * actually end access, or "revoke" means nothing.
+     */
+    async userCanAccessRepository(
+        userId:          string,
+        provider:        "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName:  string
+    ): Promise<boolean> {
+        const result = await pool.query(
+            `SELECT 1
+             FROM integrations i
+             JOIN organization_members m ON m.organization_id = i.organization_id
+             WHERE m.user_id = $1
+               AND i.provider = $2
+               AND lower(i.repository_owner) = lower($3)
+               AND lower(i.repository_name) = lower($4)
+               AND i.status <> 'REVOKED'
+             LIMIT 1;`,
+            [userId, provider, repositoryOwner, repositoryName]
+        );
+
+        return result.rows.length > 0;
+    }
+
     async findActiveByRepository(
         provider:        "github" | "gitlab",
         repositoryOwner: string,
