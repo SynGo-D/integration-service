@@ -55,6 +55,13 @@ export function createIntegrationRoutes(
         (req, res) => controller.list(req, res)
     );
 
+    // Before /:id, or "access" would be parsed as an integration id and
+    // rejected by the UUID validator.
+    router.get(
+        "/access",
+        (req, res) => controller.checkAccess(req, res)
+    );
+
     router.get(
         "/:id",
         validateUUIDParam,

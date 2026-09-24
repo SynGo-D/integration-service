@@ -228,6 +228,38 @@ export class IntegrationController {
      * Returns a single integration by its UUID.
      * Access token is never returned in the response.
      */
+    /**
+     * GET /api/integrations/access?owner=&repo=&provider=
+     *
+     * Answers one question for main-backend's gateway: may the caller
+     * (X-User-Id) see this repository? 404 rather than 403 when not, the
+     * same choice OrganizationService makes — a "forbidden" would confirm
+     * that a repository is connected to some other organization.
+     */
+    checkAccess = async (req: Request, res: Response): Promise<void> => {
+        try {
+            const userId = req.header("X-User-Id") ?? "";
+            const owner = String(req.query.owner ?? "");
+            const repo = String(req.query.repo ?? "");
+            const provider = String(req.query.provider ?? "github") as "github" | "gitlab";
+
+            const allowed = await this.integrationService.userCanAccessRepository(
+                userId, provider, owner, repo
+            );
+
+            if (!allowed) {
+                res.status(404).json({ success: false, message: "Repository not found." });
+                return;
+            }
+
+            res.status(200).json({ success: true, data: { allowed: true } });
+        } catch (error) {
+            console.error("[integrations] access check failed:", error);
+            // Fail closed: an error here must not become access.
+            res.status(404).json({ success: false, message: "Repository not found." });
+        }
+    };
+
     getById = async (req: Request, res: Response): Promise<void> => {
         try {
             const id = req.params.id as string;

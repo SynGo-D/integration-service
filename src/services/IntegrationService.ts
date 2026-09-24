@@ -341,6 +341,30 @@ export class IntegrationService {
         }
     }
 
+    /**
+     * Whether this user may see a repository's analyses, reviews, rules
+     * and contributors.
+     *
+     * Access follows organization membership and nothing else: an admin
+     * creates an organization, connects repositories to it, and adds
+     * people by email. Being signed in is not access — that is the
+     * distinction the repository routes were missing.
+     */
+    async userCanAccessRepository(
+        userId: string,
+        provider: "github" | "gitlab",
+        repositoryOwner: string,
+        repositoryName: string
+    ): Promise<boolean> {
+        if (!userId || !repositoryOwner || !repositoryName) {
+            return false;
+        }
+
+        return this.integrationRepository.userCanAccessRepository(
+            userId, provider, repositoryOwner, repositoryName
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Read operations
     // -----------------------------------------------------------------------
