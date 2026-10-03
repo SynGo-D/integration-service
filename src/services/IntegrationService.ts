@@ -10,6 +10,7 @@ import { OAuthState } from "../types/OAuthState.js";
 import { AppError } from "../errors/AppError.js";
 import { ValidationError } from "../errors/ValidationError.js";
 import { OrganizationService } from "./OrganizationService.js";
+import type { OrganizationRole } from "../models/Organization.js";
 import { RepositoryUrlParser } from "../utils/RepositoryUrlParser.js";
 import { env } from "../config/env.js";
 
@@ -350,17 +351,17 @@ export class IntegrationService {
      * people by email. Being signed in is not access — that is the
      * distinction the repository routes were missing.
      */
-    async userCanAccessRepository(
+    async repositoryRolesFor(
         userId: string,
         provider: "github" | "gitlab",
         repositoryOwner: string,
         repositoryName: string
-    ): Promise<boolean> {
+    ): Promise<OrganizationRole[]> {
         if (!userId || !repositoryOwner || !repositoryName) {
-            return false;
+            return [];
         }
 
-        return this.integrationRepository.userCanAccessRepository(
+        return this.integrationRepository.repositoryRolesFor(
             userId, provider, repositoryOwner, repositoryName
         );
     }

@@ -3,6 +3,7 @@
 import { randomUUID, timingSafeEqual } from "crypto";
 import { pool } from "../config/database.js";
 import { Integration } from "../models/Integration.js";
+import type { OrganizationRole } from "../models/Organization.js";
 import { encryptToken, decryptToken } from "../utils/crypto.js";
 
 /**
@@ -453,26 +454,36 @@ export class IntegrationRepository {
      * REVOKED connections are excluded. Disconnecting a repository has to
      * actually end access, or "revoke" means nothing.
      */
-    async userCanAccessRepository(
+    /**
+     * Every role this user holds in an organization that has this
+     * repository connected. Empty means no access.
+     *
+     * Roles, not a yes/no, because the gateway has to answer more than
+     * "may they see it": a developer may edit business rules and a manager
+     * may not, which no single boolean can express. A set rather than one
+     * role because somebody can belong to two organizations that both
+     * connected the same repository, and refusing them a capability one of
+     * those memberships grants would be wrong.
+     */
+    async repositoryRolesFor(
         userId:          string,
         provider:        "github" | "gitlab",
         repositoryOwner: string,
         repositoryName:  string
-    ): Promise<boolean> {
-        const result = await pool.query(
-            `SELECT 1
+    ): Promise<OrganizationRole[]> {
+        const result = await pool.query<{ role: OrganizationRole }>(
+            `SELECT DISTINCT m.role
              FROM integrations i
              JOIN organization_members m ON m.organization_id = i.organization_id
              WHERE m.user_id = $1
                AND i.provider = $2
                AND lower(i.repository_owner) = lower($3)
                AND lower(i.repository_name) = lower($4)
-               AND i.status <> 'REVOKED'
-             LIMIT 1;`,
+               AND i.status <> 'REVOKED';`,
             [userId, provider, repositoryOwner, repositoryName]
         );
 
-        return result.rows.length > 0;
+        return result.rows.map((row) => row.role);
     }
 
     async findActiveByRepository(

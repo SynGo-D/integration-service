@@ -231,8 +231,8 @@ export class IntegrationController {
     /**
      * GET /api/integrations/access?owner=&repo=&provider=
      *
-     * Answers one question for main-backend's gateway: may the caller
-     * (X-User-Id) see this repository? 404 rather than 403 when not, the
+     * Answers for main-backend's gateway: may the caller (X-User-Id) see
+     * this repository, and in what roles? 404 rather than 403 when not, the
      * same choice OrganizationService makes — a "forbidden" would confirm
      * that a repository is connected to some other organization.
      */
@@ -243,16 +243,18 @@ export class IntegrationController {
             const repo = String(req.query.repo ?? "");
             const provider = String(req.query.provider ?? "github") as "github" | "gitlab";
 
-            const allowed = await this.integrationService.userCanAccessRepository(
+            const roles = await this.integrationService.repositoryRolesFor(
                 userId, provider, owner, repo
             );
 
-            if (!allowed) {
+            if (roles.length === 0) {
                 res.status(404).json({ success: false, message: "Repository not found." });
                 return;
             }
 
-            res.status(200).json({ success: true, data: { allowed: true } });
+            // The roles travel with the answer so the gateway can decide
+            // what this caller may do, not only what they may see.
+            res.status(200).json({ success: true, data: { allowed: true, roles } });
         } catch (error) {
             console.error("[integrations] access check failed:", error);
             // Fail closed: an error here must not become access.
